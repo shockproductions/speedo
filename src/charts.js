@@ -1,96 +1,125 @@
-export class RunCharts {
+const TICK_COLOR = "#9db0bb";
+const GRID_COLOR = "rgba(255,255,255,0.06)";
+const LEGEND_COLOR = "#f4f8fb";
+export const SERIES_COLORS = {
+  primary: "#ff7a2f",
+  compare: "#7cc4ff",
+  accent: "#ffd36c",
+  delta: "#c792ea",
+};
+
+function baseOptions({ xTitle, yTitle, onHoverX }) {
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    parsing: false,
+    normalized: true,
+    interaction: { intersect: false, mode: "nearest", axis: "x" },
+    onHover: (_, elements, chart) => {
+      if (!onHoverX || !elements.length) return;
+      const element = elements[0];
+      const point = chart.data.datasets[element.datasetIndex].data[element.index];
+      if (point) onHoverX(point.x, element.datasetIndex);
+    },
+    plugins: {
+      legend: { labels: { color: LEGEND_COLOR, boxWidth: 12 } },
+      tooltip: { enabled: true },
+    },
+    scales: {
+      x: {
+        type: "linear",
+        title: { display: Boolean(xTitle), text: xTitle, color: TICK_COLOR },
+        ticks: { color: TICK_COLOR, maxTicksLimit: 8 },
+        grid: { color: GRID_COLOR },
+      },
+      y: {
+        title: { display: Boolean(yTitle), text: yTitle, color: TICK_COLOR },
+        ticks: { color: TICK_COLOR },
+        grid: { color: GRID_COLOR },
+      },
+    },
+  };
+}
+
+function lineDataset(label, data, color, extra = {}) {
+  return {
+    label,
+    data,
+    borderColor: color,
+    backgroundColor: color,
+    borderWidth: 2,
+    pointRadius: 0,
+    tension: 0.15,
+    spanGaps: false,
+    ...extra,
+  };
+}
+
+export class ChartPanel {
   constructor(container) {
     this.container = container;
-    this.speedChart = null;
-    this.accelChart = null;
+    this.charts = [];
   }
 
   destroy() {
-    this.speedChart?.destroy();
-    this.accelChart?.destroy();
+    for (const chart of this.charts) chart.destroy();
+    this.charts = [];
+    this.container.innerHTML = "";
   }
 
-  render(derivedSamples) {
-    this.destroy();
-    this.container.innerHTML = `
-      <div class="chart-grid">
-        <div class="chart-card">
-          <h3>Speed vs Time</h3>
-          <canvas id="speedChart"></canvas>
-        </div>
-        <div class="chart-card">
-          <h3>Acceleration vs Time</h3>
-          <canvas id="accelChart"></canvas>
-        </div>
-      </div>
-    `;
+  addCard(title) {
+    const card = document.createElement("div");
+    card.className = "chart-card";
+    card.innerHTML = `<h3>${title}</h3><canvas></canvas>`;
+    this.container.appendChild(card);
+    return card.querySelector("canvas");
+  }
 
-    const labels = derivedSamples.map((item) => item.time.toFixed(1));
-    const speedCanvas = this.container.querySelector("#speedChart");
-    const accelCanvas = this.container.querySelector("#accelChart");
-    const chartOptions = {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,
-      interaction: {
-        intersect: false,
-        mode: "index",
-      },
-      plugins: {
-        legend: {
-          labels: {
-            color: "#f4f8fb",
-          },
-        },
-      },
-      scales: {
-        x: {
-          ticks: { color: "#9db0bb" },
-          grid: { color: "rgba(255,255,255,0.06)" },
-        },
-        y: {
-          ticks: { color: "#9db0bb" },
-          grid: { color: "rgba(255,255,255,0.06)" },
-        },
-      },
-    };
-
-    this.speedChart = new Chart(speedCanvas, {
+  // datasets: [{label, data: [{x, y}], color}]
+  line(title, datasets, { xTitle, yTitle, onHoverX, zeroLine = false } = {}) {
+    const canvas = this.addCard(title);
+    const options = baseOptions({ xTitle, yTitle, onHoverX });
+    if (zeroLine) {
+      options.scales.y.grid = {
+        color: (context) => (context.tick.value === 0 ? "rgba(255,255,255,0.35)" : GRID_COLOR),
+      };
+    }
+    const chart = new Chart(canvas, {
       type: "line",
       data: {
-        labels,
-        datasets: [
-          {
-            label: "km/h",
-            data: derivedSamples.map((item) => item.speedKmh),
-            borderColor: "#ff7a2f",
-            backgroundColor: "rgba(255,122,47,0.18)",
-            fill: true,
-            tension: 0.22,
-            pointRadius: 0,
-          },
-        ],
+        datasets: datasets.map((dataset) => lineDataset(dataset.label, dataset.data, dataset.color, dataset.extra)),
       },
-      options: chartOptions,
+      options,
     });
+    this.charts.push(chart);
+    return chart;
+  }
 
-    this.accelChart = new Chart(accelCanvas, {
-      type: "line",
+  // Friction circle: lateral g on x, longitudinal g on y.
+  gg(title, datasets) {
+    const canvas = this.addCard(title);
+    const options = baseOptions({ xTitle: "lateral g (right +)", yTitle: "long g (accel +)" });
+    options.interaction = { intersect: true, mode: "nearest" };
+    options.aspectRatio = 1;
+    options.scales.x.min = -1.5;
+    options.scales.x.max = 1.5;
+    options.scales.y.min = -1.5;
+    options.scales.y.max = 1.5;
+    const chart = new Chart(canvas, {
+      type: "scatter",
       data: {
-        labels,
-        datasets: [
-          {
-            label: "m/s^2",
-            data: derivedSamples.map((item) => item.acceleration),
-            borderColor: "#ffd36c",
-            backgroundColor: "rgba(255,211,108,0.16)",
-            fill: true,
-            tension: 0.22,
-            pointRadius: 0,
-          },
-        ],
+        datasets: datasets.map((dataset) => ({
+          label: dataset.label,
+          data: dataset.data,
+          backgroundColor: `${dataset.color}66`,
+          borderColor: "transparent",
+          pointRadius: 2,
+        })),
       },
-      options: chartOptions,
+      options,
     });
+    this.charts.push(chart);
+    return chart;
   }
 }

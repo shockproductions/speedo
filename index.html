@@ -30,7 +30,7 @@
         <div>
           <div class="title-row">
             <h1>Speedo</h1>
-            <span class="version-badge">v0.08</span>
+            <span class="version-badge">v0.09</span>
             <button id="checkUpdatesButton" class="secondary-button utility-button" type="button">
               Check Updates
             </button>
@@ -42,19 +42,48 @@
 
       <nav class="tabbar" aria-label="Primary">
         <button class="tab-button active" data-page="recorderPage" type="button">Recorder</button>
-        <button class="tab-button" data-page="runsPage" type="button">Runs</button>
+        <button class="tab-button" data-page="runsPage" type="button">Sessions</button>
         <button class="tab-button" data-page="imuPage" type="button">IMU</button>
       </nav>
 
       <main>
         <section id="recorderPage" class="page active">
-          <section class="panel live-panel">
+          <section class="panel live-panel" id="livePanel" data-mode="track">
+            <div class="mode-switch" role="group" aria-label="Session mode">
+              <button class="mode-button" data-mode="track" type="button">Track</button>
+              <button class="mode-button" data-mode="drift" type="button">Drift</button>
+              <button class="mode-button" data-mode="drag" type="button">Drag</button>
+            </div>
+
             <div class="live-stage">
-              <div class="speed-stack">
+              <div class="hud">
+                <div class="hud-track">
+                  <div class="lap-clock" id="lapClock">--:--.-</div>
+                  <div class="delta-pill" id="deltaPill">delta --</div>
+                  <div class="hud-row">
+                    <article class="mini-stat"><span class="label">Last</span><strong id="lastLap">--:--</strong></article>
+                    <article class="mini-stat"><span class="label">Best</span><strong id="bestLap">--:--</strong></article>
+                    <article class="mini-stat"><span class="label">Laps</span><strong id="lapNumber">0</strong></article>
+                  </div>
+                </div>
+
+                <div class="hud-drift">
+                  <div class="drift-angle">
+                    <span id="driftAngle">--</span><span class="unit">&deg;</span>
+                    <span id="driftDirection" class="drift-direction"></span>
+                  </div>
+                  <div class="hud-row">
+                    <article class="mini-stat"><span class="label">Current</span><strong id="driftChainScore">--</strong></article>
+                    <article class="mini-stat"><span class="label">Last</span><strong id="driftLastScore">--</strong></article>
+                    <article class="mini-stat"><span class="label">Best</span><strong id="driftBestScore">--</strong></article>
+                  </div>
+                </div>
+
                 <div class="speed-value">
                   <span id="liveSpeed">0</span>
-                  <span class="unit">km/h</span>
+                  <span class="unit" id="speedUnit">km/h</span>
                 </div>
+                <p id="lapFlash" class="lap-flash" hidden></p>
                 <p id="recordingState" class="status-pill idle">Ready to record</p>
               </div>
 
@@ -62,24 +91,31 @@
                 <canvas id="gForceCanvas" class="gforce-canvas" width="260" height="260"></canvas>
                 <div class="gforce-grid">
                   <article class="mini-stat">
-                    <span class="label" id="lateralLabel">Sideways</span>
-                    <strong id="lateralG">0.00 g</strong>
+                    <span class="label">Lateral</span>
+                    <strong id="lateralG">-- g</strong>
                   </article>
                   <article class="mini-stat">
-                    <span class="label" id="longitudinalLabel">Forward</span>
-                    <strong id="longitudinalG">0.00 g</strong>
+                    <span class="label">Longitudinal</span>
+                    <strong id="longitudinalG">-- g</strong>
                   </article>
                   <article class="mini-stat">
-                    <span class="label" id="verticalLabel">Vertical</span>
-                    <strong id="verticalG">0.00 g</strong>
+                    <span class="label">Vertical</span>
+                    <strong id="verticalG">-- g</strong>
                   </article>
                 </div>
+                <p class="g-note" id="gNote"></p>
               </div>
             </div>
 
             <div class="actions">
-              <button id="startButton" class="primary-button">Start Run</button>
-              <button id="stopButton" class="danger-button" disabled>Stop Run</button>
+              <button id="startButton" class="primary-button" type="button">Start</button>
+              <button id="armButton" class="secondary-button grow-button" type="button">Arm Auto-Start</button>
+              <button id="stopButton" class="danger-button" type="button" disabled>Stop</button>
+            </div>
+            <div class="actions track-actions">
+              <button id="markStartFinishButton" class="secondary-button grow-button" type="button">
+                Mark Start/Finish Here
+              </button>
             </div>
 
             <div class="stat-grid">
@@ -92,12 +128,16 @@
                 <strong id="motionStatus">Idle</strong>
               </article>
               <article class="mini-stat">
-                <span class="label">Samples</span>
-                <strong id="sampleCount">0</strong>
+                <span class="label">Track</span>
+                <strong id="liveTrackName">-</strong>
               </article>
               <article class="mini-stat">
                 <span class="label">Elapsed</span>
                 <strong id="elapsedValue">0:00</strong>
+              </article>
+              <article class="mini-stat">
+                <span class="label">Samples</span>
+                <strong id="sampleCount">0</strong>
               </article>
             </div>
 
@@ -107,84 +147,97 @@
           <section class="panel settings-panel">
             <div class="section-head">
               <div>
-                <p class="eyebrow">Recorder Limits</p>
-                <h2>Capture Settings</h2>
+                <p class="eyebrow">Phone Mount</p>
+                <h2>IMU Calibration</h2>
+              </div>
+            </div>
+            <p class="panel-note">
+              Mount the phone firmly, at any angle. The mount angle is captured automatically
+              whenever the car stands still for two seconds, and the forward axis solves itself from
+              GPS during the first minute of driving. Sessions are re-processed with the final
+              calibration afterwards, so the out-lap is not wasted.
+            </p>
+            <div class="detail-grid">
+              <article class="detail-stat"><span>Mount angle</span><strong id="calibrationGravity">-</strong></article>
+              <article class="detail-stat"><span>Forward axis</span><strong id="calibrationForward">-</strong></article>
+              <article class="detail-stat"><span>Gyro</span><strong id="calibrationGyro">-</strong></article>
+            </div>
+            <div class="detail-actions">
+              <button id="captureMountButton" class="secondary-button" type="button">Capture Mount Now</button>
+              <button id="resetCalibrationButton" class="secondary-button" type="button">Reset Calibration</button>
+              <button id="skipCalibrationButton" class="secondary-button" type="button">GPS Only (No IMU)</button>
+            </div>
+          </section>
+
+          <section class="panel settings-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Circuit</p>
+                <h2>Tracks</h2>
+              </div>
+            </div>
+            <div class="settings-grid">
+              <label class="field">
+                <span>Lap timing</span>
+                <select id="trackSelect"></select>
+                <small>
+                  Auto uses the nearest saved track, or places a start/finish line by itself 20 s
+                  after you first get up to speed.
+                </small>
+              </label>
+            </div>
+            <div class="detail-actions">
+              <button id="deleteTrackButton" class="danger-button" type="button" disabled>
+                Delete Selected Track
+              </button>
+            </div>
+          </section>
+
+          <section class="panel settings-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Recorder</p>
+                <h2>Settings</h2>
               </div>
             </div>
 
             <div class="settings-grid">
               <label class="field">
-                <span>Logging Rate (Hz)</span>
-                <input
-                  id="sampleRateInput"
-                  inputmode="decimal"
-                  placeholder="-, 0, 1, 5, 10"
-                  value="20"
-                />
-                <small>`0` or `-` means unrestricted logging.</small>
+                <span>IMU Logging Rate (Hz)</span>
+                <input id="sampleRateInput" inputmode="decimal" placeholder="0 = unrestricted" />
+                <small>GPS fixes are always logged; this caps motion samples. 0 = unrestricted.</small>
               </label>
               <label class="field">
                 <span>Max Recording Time (s)</span>
-                <input
-                  id="maxDurationInput"
-                  inputmode="numeric"
-                  placeholder="-, 0, 60, 180"
-                  value="0"
-                />
-                <small>`0` or `-` means unlimited duration.</small>
+                <input id="maxDurationInput" inputmode="numeric" placeholder="0 = unlimited" />
+                <small>0 = unlimited.</small>
               </label>
               <label class="field">
-                <span>Lap Radius X (m)</span>
-                <input
-                  id="lapDistanceInput"
-                  inputmode="decimal"
-                  placeholder="0, 50, 150"
-                  value="150"
-                />
-                <small>Detect a lap when the car returns within this distance.</small>
+                <span>Minimum Lap Time (s)</span>
+                <input id="lapMinTimeInput" inputmode="decimal" placeholder="20" />
+                <small>Ignores repeated line crossings faster than this.</small>
               </label>
               <label class="field">
-                <span>Lap Min Time Y (s)</span>
-                <input
-                  id="lapMinTimeInput"
-                  inputmode="decimal"
-                  placeholder="0, 15, 30"
-                  value="30"
-                />
-                <small>Ignore same-area returns until this many seconds have passed.</small>
+                <span>Auto-Start Speed (km/h)</span>
+                <input id="autoStartInput" inputmode="decimal" placeholder="30" />
+                <small>When armed, recording starts above this speed and keeps the 5 s before.</small>
+              </label>
+              <label class="field">
+                <span>Auto-Stop After Standing (s)</span>
+                <input id="autoStopInput" inputmode="numeric" placeholder="60" />
+                <small>Armed sessions stop after standing this long, then re-arm. 0 = never.</small>
+              </label>
+              <label class="field">
+                <span>Units</span>
+                <select id="unitsSelect">
+                  <option value="kmh">km/h, km</option>
+                  <option value="mph">mph, miles</option>
+                </select>
               </label>
             </div>
-
-            <div class="detail-grid">
-              <article class="detail-stat">
-                <span>Current Rate Limit</span>
-                <strong id="rateSummary">20 Hz</strong>
-              </article>
-              <article class="detail-stat">
-                <span>Current Max Time</span>
-                <strong id="durationSummary">Unlimited</strong>
-              </article>
-              <article class="detail-stat">
-                <span>Lap Detection</span>
-                <strong id="lapSummary">150 m / 30 s</strong>
-              </article>
-              <article class="detail-stat">
-                <span>Mount Orientation</span>
-                <strong id="orientationSummary">Setup required</strong>
-              </article>
-            </div>
-
-            <div class="detail-actions">
-              <button id="captureMountButton" class="secondary-button" type="button">
-                Capture Mount Angle
-              </button>
-              <button id="calibrateForwardButton" class="secondary-button" type="button">
-                Calibrate Forward
-              </button>
-              <button id="skipCalibrationButton" class="secondary-button" type="button">
-                Skip IMU Calibration
-              </button>
-              <span id="calibrationStatus" class="status-pill idle">Capture mount first</span>
+            <div class="toggle-row">
+              <label class="toggle"><input type="checkbox" id="voiceToggle" /> Spoken lap times</label>
+              <label class="toggle"><input type="checkbox" id="driftToneToggle" /> Drift angle tone</label>
             </div>
           </section>
         </section>
@@ -195,11 +248,11 @@
               <div class="section-head">
                 <div>
                   <p class="eyebrow">Saved Sessions</p>
-                  <h2>Runs</h2>
+                  <h2>Sessions</h2>
                 </div>
               </div>
               <div id="runList" class="run-list empty-state">
-                <p>No runs yet. Record a session to start building telemetry history.</p>
+                <p>No sessions yet. Record one to start building telemetry history.</p>
               </div>
             </section>
 
@@ -207,21 +260,22 @@
               <div class="section-head">
                 <div>
                   <p class="eyebrow">Review</p>
-                  <h2 id="detailTitle">Run Analysis</h2>
+                  <h2 id="detailTitle">Session Analysis</h2>
                 </div>
                 <div class="detail-actions">
-                  <button id="exportJsonButton" class="secondary-button" disabled>Export JSON</button>
-                  <button id="exportCsvButton" class="secondary-button" disabled>Export CSV</button>
-                  <button id="deleteRunButton" class="danger-button" disabled>Delete Run</button>
+                  <button id="exportCsvButton" class="secondary-button utility-button" disabled>CSV</button>
+                  <button id="exportVboButton" class="secondary-button utility-button" disabled>VBO</button>
+                  <button id="exportGpxButton" class="secondary-button utility-button" disabled>GPX</button>
+                  <button id="exportJsonButton" class="secondary-button utility-button" disabled>JSON</button>
+                  <button id="deleteRunButton" class="danger-button utility-button" disabled>Delete</button>
                 </div>
               </div>
 
               <div id="runSummaryBar" class="detail-grid">
-                <article class="detail-stat"><span>Saved Runs</span><strong>0</strong></article>
-                <article class="detail-stat"><span>Best 1/4 Mile</span><strong>N/A</strong></article>
+                <article class="detail-stat"><span>Saved Sessions</span><strong>0</strong></article>
               </div>
               <div id="runDetails" class="details-empty">
-                <p>Select a run to inspect speed, acceleration, braking, and trajectory.</p>
+                <p>Select a session to see laps, sectors, g-forces and drifts.</p>
               </div>
             </section>
           </div>
@@ -244,8 +298,8 @@
               </div>
             </div>
             <p class="imu-note">
-              Live IMU values are device-relative. Sideways is X, forward and braking is Y, and Z
-              is vertical through the phone body.
+              Live IMU values are raw and device-relative (X across the screen, Y along it, Z out
+              of the screen). The Recorder page shows the calibrated vehicle-frame values.
             </p>
             <div id="imuMount"></div>
           </section>

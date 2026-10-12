@@ -17,9 +17,9 @@ export class IMUView {
     this.container.innerHTML = `
       <div class="imu-layout">
         <div class="detail-grid">
-          <article class="detail-stat"><span>Lateral X</span><strong id="imuX">0.00 g</strong></article>
-          <article class="detail-stat"><span>Longitudinal Y</span><strong id="imuY">0.00 g</strong></article>
-          <article class="detail-stat"><span>Vertical Z</span><strong id="imuZ">0.00 g</strong></article>
+          <article class="detail-stat"><span>Device X</span><strong id="imuX">0.00 g</strong></article>
+          <article class="detail-stat"><span>Device Y</span><strong id="imuY">0.00 g</strong></article>
+          <article class="detail-stat"><span>Device Z</span><strong id="imuZ">0.00 g</strong></article>
           <article class="detail-stat"><span>Resultant</span><strong id="imuTotal">0.00 g</strong></article>
         </div>
         <div class="chart-card">
@@ -40,21 +40,21 @@ export class IMUView {
         labels: [],
         datasets: [
           {
-            label: "Lateral X",
+            label: "X",
             data: [],
             borderColor: "#ff7a2f",
             pointRadius: 0,
             tension: 0.22,
           },
           {
-            label: "Longitudinal Y",
+            label: "Y",
             data: [],
             borderColor: "#ffd36c",
             pointRadius: 0,
             tension: 0.22,
           },
           {
-            label: "Vertical Z",
+            label: "Z",
             data: [],
             borderColor: "#ff9958",
             pointRadius: 0,

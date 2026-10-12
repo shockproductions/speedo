@@ -1,62 +1,110 @@
 let mapInstanceCounter = 0;
 
+// Slow -> fast: deep red, orange, yellow, green.
+function speedColor(fraction) {
+  const stops = [
+    [0, [214, 40, 40]],
+    [0.4, [255, 122, 47]],
+    [0.7, [255, 211, 108]],
+    [1, [92, 214, 120]],
+  ];
+  const clamped = Math.min(1, Math.max(0, fraction));
+  for (let index = 1; index < stops.length; index += 1) {
+    const [position, color] = stops[index];
+    const [previousPosition, previousColor] = stops[index - 1];
+    if (clamped <= position) {
+      const local = (clamped - previousPosition) / (position - previousPosition);
+      const mixed = color.map((channel, channelIndex) =>
+        Math.round(previousColor[channelIndex] + (channel - previousColor[channelIndex]) * local),
+      );
+      return `rgb(${mixed.join(",")})`;
+    }
+  }
+  return "rgb(92,214,120)";
+}
+
 export class MapView {
   constructor(container) {
     this.container = container;
     this.map = null;
-    this.polyline = null;
+    this.cursor = null;
+    this.pickHandler = null;
   }
 
-  render(samples, options = {}) {
-    const points = samples
-      .filter((sample) => sample.lat != null && sample.lon != null)
-      .map((sample) => [sample.lat, sample.lon]);
+  destroy() {
+    this.map?.remove();
+    this.map = null;
+  }
 
-    if (!points.length) {
+  // points: [{lat, lon, v}], gates: [{a, b, color, label}]
+  render({ points, gates = [], colorBySpeed = true, compact = false }) {
+    const valid = points.filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lon));
+    if (!valid.length) {
       this.container.innerHTML =
-        "<div class=\"details-empty\"><p>No GNSS positions were captured for this run.</p></div>";
+        '<div class="details-empty"><p>No GNSS positions were captured for this run.</p></div>';
       return;
     }
 
-    if (this.map) {
-      this.map.remove();
-    }
-
-    const mapId = `trajectoryMap-${mapInstanceCounter += 1}`;
-    const frameClass = options.compact ? "map-frame compact-map" : "map-frame";
-    this.container.innerHTML = `<div id="${mapId}" class="${frameClass}"></div>`;
-
-    this.map = L.map(mapId, {
-      zoomControl: false,
-      attributionControl: !options.compact,
-    });
-
+    this.destroy();
+    const mapId = `trajectoryMap-${(mapInstanceCounter += 1)}`;
+    this.container.innerHTML = `<div id="${mapId}" class="map-frame${compact ? " compact-map" : ""}"></div>`;
+    this.map = L.map(mapId, { zoomControl: false, attributionControl: true, preferCanvas: true });
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
       attribution: "&copy; OpenStreetMap contributors",
     }).addTo(this.map);
 
-    this.polyline = L.polyline(points, {
-      color: "#ff7a2f",
-      weight: options.compact ? 3 : 4,
-    }).addTo(this.map);
+    const latLngs = valid.map((point) => [point.lat, point.lon]);
+    if (colorBySpeed && valid.length > 1) {
+      const speeds = valid.map((point) => point.v).filter(Number.isFinite);
+      const min = Math.min(...speeds);
+      const max = Math.max(...speeds);
+      for (let index = 1; index < valid.length; index += 1) {
+        const speed = (valid[index].v + valid[index - 1].v) / 2;
+        L.polyline([latLngs[index - 1], latLngs[index]], {
+          color: speedColor(max > min ? (speed - min) / (max - min) : 1),
+          weight: 4,
+          interactive: false,
+        }).addTo(this.map);
+      }
+    } else {
+      L.polyline(latLngs, { color: "#ff7a2f", weight: 4, interactive: false }).addTo(this.map);
+    }
 
-    L.circleMarker(points[0], {
-      radius: options.compact ? 5 : 6,
+    for (const gate of gates) {
+      L.polyline(
+        [
+          [gate.a.lat, gate.a.lon],
+          [gate.b.lat, gate.b.lon],
+        ],
+        { color: gate.color ?? "#ffffff", weight: 5, dashArray: gate.auto ? "6 6" : null },
+      )
+        .bindTooltip(gate.label ?? "", { permanent: true, direction: "top", className: "gate-label" })
+        .addTo(this.map);
+    }
+
+    this.cursor = L.circleMarker(latLngs[0], {
+      radius: 7,
       color: "#ffffff",
+      weight: 2,
       fillColor: "#ff4121",
       fillOpacity: 1,
     }).addTo(this.map);
 
-    L.circleMarker(points[points.length - 1], {
-      radius: options.compact ? 5 : 6,
-      color: "#ffffff",
-      fillColor: "#ff6a6a",
-      fillOpacity: 1,
-    }).addTo(this.map);
-
-    this.map.fitBounds(this.polyline.getBounds(), {
-      padding: options.compact ? [10, 10] : [18, 18],
+    this.map.on("click", (event) => {
+      this.pickHandler?.({ lat: event.latlng.lat, lon: event.latlng.lng });
     });
+    this.map.fitBounds(L.latLngBounds(latLngs), { padding: [18, 18] });
+  }
+
+  setCursor(lat, lon) {
+    if (this.cursor && Number.isFinite(lat) && Number.isFinite(lon)) {
+      this.cursor.setLatLng([lat, lon]);
+    }
+  }
+
+  setPickHandler(handler) {
+    this.pickHandler = handler;
+    this.container.classList.toggle("map-picking", Boolean(handler));
   }
 }

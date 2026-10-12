@@ -24,6 +24,9 @@ export class LightMotionFilter {
       "linearAccelX",
       "linearAccelY",
       "linearAccelZ",
+      "gyroX",
+      "gyroY",
+      "gyroZ",
     ];
 
     if (!this.state) {

@@ -1,5 +1,28 @@
+const DEG_TO_RAD = Math.PI / 180;
+
+// GNSS fix timestamps come from a different clock than motion events. Map them onto the
+// monotonic page clock using the smallest observed delivery latency, which keeps the precise
+// fix time while making both streams comparable.
+class ClockAligner {
+  constructor() {
+    this.offset = null;
+  }
+
+  align(fixTime, arrival) {
+    if (!Number.isFinite(fixTime)) {
+      return arrival;
+    }
+    const offset = arrival - fixTime;
+    if (this.offset == null || offset < this.offset) {
+      this.offset = offset;
+    }
+    return fixTime + this.offset;
+  }
+}
+
 export class SensorManager {
   constructor({ onLocation, onMotion, onStatus }) {
+    this.clock = new ClockAligner();
     this.onLocation = onLocation;
     this.onMotion = onMotion;
     this.onStatus = onStatus;
@@ -46,9 +69,12 @@ export class SensorManager {
       this.geoWatchId = navigator.geolocation.watchPosition(
         (position) => {
           const coords = position.coords;
+          const arrival = performance.timeOrigin + performance.now();
           this.onStatus?.("location", "Live");
           this.onLocation?.({
-            timestamp: position.timestamp,
+            t: this.clock.align(position.timestamp, arrival),
+            arrival,
+            fixTime: position.timestamp,
             lat: coords.latitude,
             lon: coords.longitude,
             altitude: coords.altitude,
@@ -98,9 +124,12 @@ export class SensorManager {
   handleMotion(event) {
     const absolute = event.accelerationIncludingGravity;
     const linear = event.acceleration;
+    const rotation = event.rotationRate;
     if (!absolute && !linear) {
       return;
     }
+    const hasRotation =
+      rotation && Number.isFinite(rotation.alpha) && Number.isFinite(rotation.beta) && Number.isFinite(rotation.gamma);
     this.onStatus?.("motion", "Live");
     this.onMotion?.({
       timestamp: performance.timeOrigin + performance.now(),
@@ -113,6 +142,10 @@ export class SensorManager {
       linearAccelX: linear?.x ?? null,
       linearAccelY: linear?.y ?? null,
       linearAccelZ: linear?.z ?? null,
+      // rotationRate is deg/s: beta about X, gamma about Y, alpha about Z.
+      gyroX: hasRotation ? rotation.beta * DEG_TO_RAD : null,
+      gyroY: hasRotation ? rotation.gamma * DEG_TO_RAD : null,
+      gyroZ: hasRotation ? rotation.alpha * DEG_TO_RAD : null,
       interval: event.interval,
       hasAbsoluteAcceleration: Boolean(absolute),
     });
