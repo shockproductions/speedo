@@ -29,7 +29,7 @@
       <header class="topbar">
         <div class="title-row">
           <h1>Speedo</h1>
-          <span class="version-badge">v0.10</span>
+          <span class="version-badge">v0.11</span>
           <button id="checkUpdatesButton" class="secondary-button utility-button" type="button">
             Check Updates
           </button>
@@ -93,9 +93,12 @@
                 </label>
               </div>
               <div class="detail-actions">
-                <label class="toggle"><input type="checkbox" id="voiceToggle" /> Spoken lap times</label>
-                <button id="deleteTrackButton" class="danger-button utility-button" type="button" disabled>Delete Selected Track</button>
+                <button id="newTrackButton" class="secondary-button" type="button">New Track on Map</button>
+                <button id="editTrackButton" class="secondary-button" type="button" disabled>Edit Selected Track</button>
+                <button id="deleteTrackButton" class="danger-button utility-button" type="button" disabled>Delete</button>
               </div>
+              <div id="trackEditor" class="track-editor" hidden></div>
+              <label class="toggle"><input type="checkbox" id="voiceToggle" /> Spoken lap times</label>
             </div>
             <div class="mode-options" data-for="drift">
               <p class="panel-note">

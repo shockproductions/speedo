@@ -32,6 +32,22 @@ export function createGate(center, heading, width = DEFAULT_GATE_WIDTH) {
   };
 }
 
+// A gate drawn by tapping both edges of the track. The direction of travel is perpendicular to
+// the line; `flipped` picks which way.
+export function gateFromEndpoints(a, b, flipped = false) {
+  const across = bearingDegrees(a, b);
+  return {
+    a: { lat: a.lat, lon: a.lon },
+    b: { lat: b.lat, lon: b.lon },
+    center: { lat: (a.lat + b.lat) / 2, lon: (a.lon + b.lon) / 2 },
+    heading: (across + (flipped ? 270 : 90)) % 360,
+  };
+}
+
+export function isGateFlipped(gate) {
+  return Math.abs(wrapDegrees(gate.heading - (bearingDegrees(gate.a, gate.b) + 90))) > 90;
+}
+
 function gateGeometry(gate) {
   const projector = makeProjector(gate.center);
   return { projector, a: projector.toXY(gate.a), b: projector.toXY(gate.b) };

@@ -39,6 +39,7 @@ Then open the site in a modern mobile browser, ideally Android Chrome, and grant
 **Track days**
 - Lap timing from a start/finish line, with crossing times interpolated between GPS fixes
 - Saved tracks with sectors, theoretical best and out-lap/in-lap detection; tracks are picked automatically by location
+- Track editor in Setup: draw the start/finish and sector lines on a map or satellite view before driving (tap both edges of the track, flip the direction arrow, drag the ends), save it, and it is used for future sessions; past sessions at that location are re-timed
 - Automatic start/finish line when no track is saved, plus "Mark Start/Finish Here" while driving
 - Live predictive delta against your best lap, spoken lap times
 - Arm Auto-Start: starts above a set speed (keeping the previous 5 s), stops after standing still, re-arms for the next session

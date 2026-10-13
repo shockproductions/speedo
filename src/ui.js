@@ -20,6 +20,8 @@ import {
   saveSettings,
 } from "./settings.js";
 import { RunStorage } from "./storage.js";
+import { TrackEditor } from "./trackeditor.js";
+import { haversineMeters } from "./geo.js";
 
 const PRE_ROLL_MS = 5000;
 const CHUNK_FLUSH_MS = 5000;
@@ -106,6 +108,12 @@ export class TelemetryUI {
       onDisarm: () => this.handleArmToggle(),
     });
     this.imuView = new IMUView(this.imuMount);
+    this.trackEditor = new TrackEditor(document.getElementById("trackEditor"), {
+      getPosition: () =>
+        this.lastFix && now() - this.lastFix.arrival < 10000 ? { lat: this.lastFix.lat, lon: this.lastFix.lon } : null,
+      onSave: (track, info) => this.handleTrackSaved(track, info),
+      onClose: () => this.updateTrackButtons(),
+    });
     this.analysisView = new AnalysisView(this.runDetails, {
       getUnits: () => this.settings.units,
       getTracks: () => this.tracks,
@@ -163,6 +171,8 @@ export class TelemetryUI {
     this.driftToneToggle = byId("driftToneToggle");
     this.trackSelect = byId("trackSelect");
     this.deleteTrackButton = byId("deleteTrackButton");
+    this.newTrackButton = byId("newTrackButton");
+    this.editTrackButton = byId("editTrackButton");
     this.calibrationGravity = byId("calibrationGravity");
     this.calibrationForward = byId("calibrationForward");
     this.calibrationGyro = byId("calibrationGyro");
@@ -264,9 +274,18 @@ export class TelemetryUI {
     this.trackSelect.addEventListener("change", () => {
       this.settings.trackSelection = this.trackSelect.value;
       saveSettings(this.settings);
-      this.deleteTrackButton.disabled = !this.tracks.some((track) => track.id === this.trackSelect.value);
+      this.updateTrackButtons();
     });
     this.deleteTrackButton.addEventListener("click", () => this.handleDeleteTrack());
+    this.newTrackButton.addEventListener("click", () => {
+      this.trackEditor.open(null);
+      this.updateTrackButtons();
+    });
+    this.editTrackButton.addEventListener("click", () => {
+      const track = this.tracks.find((item) => item.id === this.trackSelect.value);
+      if (track) this.trackEditor.open(track);
+      this.updateTrackButtons();
+    });
     this.captureMountButton.addEventListener("click", () => this.handleCaptureMount());
     this.resetCalibrationButton.addEventListener("click", () => this.handleResetCalibration());
     this.skipCalibrationButton.addEventListener("click", () => this.handleSkipCalibration());
@@ -954,7 +973,36 @@ export class TelemetryUI {
     ].join("");
     const valid = selection === "auto" || selection === "none" || this.tracks.some((track) => track.id === selection);
     this.trackSelect.value = valid ? selection : "auto";
-    this.deleteTrackButton.disabled = !this.tracks.some((track) => track.id === this.trackSelect.value);
+    this.updateTrackButtons();
+  }
+
+  updateTrackButtons() {
+    const selected = this.tracks.some((track) => track.id === this.trackSelect.value);
+    const editing = this.trackEditor.isOpen();
+    this.deleteTrackButton.disabled = !selected || editing;
+    this.editTrackButton.disabled = !selected || editing;
+    this.newTrackButton.disabled = editing;
+  }
+
+  // Track drawn in Setup: select it for the next sessions and re-time past sessions there.
+  async handleTrackSaved(track, { isNew, geometryChanged }) {
+    await this.storage.saveTrack(track);
+    this.settings.trackSelection = track.id;
+    saveSettings(this.settings);
+    await this.refreshTracks();
+    this.showMessage(`${isNew ? "Saved" : "Updated"} "${track.name}". It is selected for your next sessions.`, 4000);
+    if (!geometryChanged) {
+      await this.refreshRuns(this.selectedRun?.id);
+      return;
+    }
+    const center = track.startFinish.center;
+    await this.reanalyzeRuns((run) => {
+      if (run.analysis?.track?.id === track.id || run.trackId === track.id) return true;
+      if (run.trackId) return false;
+      const points = run.analysis?.points ?? [];
+      const middle = points[Math.floor(points.length / 2)];
+      return Boolean(middle) && haversineMeters(middle, center) < 3000;
+    });
   }
 
   async handleDeleteTrack() {
