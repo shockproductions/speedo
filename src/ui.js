@@ -55,6 +55,10 @@ export class TelemetryUI {
     this.storage = new RunStorage();
     this.calibration = new MountCalibration({ onEvent: (event) => this.handleCalibrationEvent(event) });
     this.calibration.restore(loadCalibration());
+    if (this.calibration.isSkipped()) {
+      this.calibration.reset();
+      saveCalibration(null);
+    }
     this.motionFilter = new LightMotionFilter(0.18);
     this.recorder = new RunRecorder({
       onSampleCount: (count) => {
@@ -178,12 +182,7 @@ export class TelemetryUI {
     this.deleteTrackButton = byId("deleteTrackButton");
     this.newTrackButton = byId("newTrackButton");
     this.editTrackButton = byId("editTrackButton");
-    this.calibrationGravity = byId("calibrationGravity");
-    this.calibrationForward = byId("calibrationForward");
-    this.calibrationGyro = byId("calibrationGyro");
-    this.captureMountButton = byId("captureMountButton");
-    this.resetCalibrationButton = byId("resetCalibrationButton");
-    this.skipCalibrationButton = byId("skipCalibrationButton");
+    this.setupImu = byId("setupImu");
     this.enableImuButton = byId("enableImuButton");
     this.disableImuButton = byId("disableImuButton");
     this.imuMount = byId("imuMount");
@@ -316,9 +315,6 @@ export class TelemetryUI {
       if (track) this.trackEditor.open(track);
       this.updateTrackButtons();
     });
-    this.captureMountButton.addEventListener("click", () => this.handleCaptureMount());
-    this.resetCalibrationButton.addEventListener("click", () => this.handleResetCalibration());
-    this.skipCalibrationButton.addEventListener("click", () => this.handleSkipCalibration());
     this.enableImuButton.addEventListener("click", () => this.handleEnableImu());
     this.disableImuButton.addEventListener("click", () => this.handleDisableImu());
     for (const card of this.modeCards) {
@@ -533,7 +529,7 @@ export class TelemetryUI {
     const chain = this.driftSegmenter.ingest(t, beta, (estimate?.speed ?? 0) * 3.6);
     this.driftState.angle = beta;
     this.driftState.chainScore = chain ? chain.score : null;
-    this.driftTone.update(beta, Boolean(chain));
+    if (this.settings.mode === "drift") this.driftTone.update(beta, Boolean(chain));
   }
 
   handleDriftChain(chain) {
@@ -651,8 +647,6 @@ export class TelemetryUI {
       this.showMessage("Phone mount moved. Re-aligning the forward axis while you drive.");
     } else if (event === "forward-ready") {
       this.showMessage("Forward axis solved from GPS. G-forces are now in the car's frame.", 3500);
-    } else if (event === "capture-failed") {
-      this.showMessage("Mount capture failed. Keep the phone still and try again.");
     }
     saveCalibration(this.calibration.snapshot());
     this.refreshCalibrationStatus();
@@ -660,61 +654,14 @@ export class TelemetryUI {
 
   refreshCalibrationStatus() {
     const status = this.calibration.getStatus();
-    this.calibrationGravity.textContent = status.capturing ? "Capturing..." : status.gravity;
-    this.calibrationForward.textContent = status.forward;
-    this.calibrationGyro.textContent = status.gyro;
-    this.skipCalibrationButton.textContent = status.skipped ? "Use IMU" : "GPS Only (No IMU)";
-    this.captureMountButton.disabled = status.skipped || status.capturing;
+    this.setupImu.textContent = this.imuShortStatus().replace(/^IMU:? ?/, "") || "ok";
     this.driveView.setGNote(
-      status.skipped
-        ? "GPS-only mode"
-        : !status.gravityReady
-          ? "Waiting for the car to stand still"
-          : !status.forwardReady
-            ? "Drive to auto-align the forward axis"
-            : "",
+      !status.gravityReady
+        ? "Waiting for the car to stand still"
+        : !status.forwardReady
+          ? "Aligning to the car while you drive"
+          : "",
     );
-  }
-
-  async ensureMotionPermission() {
-    if (this.calibration.isSkipped()) return true;
-    const permissions = await this.sensors.requestPermissions({ location: false, motion: true });
-    if (!permissions.ok) {
-      this.showMessage(permissions.issues.join(" "));
-      return false;
-    }
-    this.syncSensors();
-    return true;
-  }
-
-  async handleCaptureMount() {
-    if (!(await this.ensureMotionPermission())) return;
-    this.motionFilter.reset();
-    this.calibration.startManualCapture(1500);
-    this.showMessage("Hold still: capturing the mount angle...", 2000);
-    this.refreshCalibrationStatus();
-  }
-
-  handleResetCalibration() {
-    this.calibration.reset();
-    saveCalibration(null);
-    this.syncSensors();
-    this.refreshCalibrationStatus();
-    this.showMessage("Calibration cleared. It re-captures when the car stops and re-solves while you drive.");
-  }
-
-  async handleSkipCalibration() {
-    if (this.calibration.isSkipped()) {
-      this.calibration.reset();
-      saveCalibration(null);
-      await this.ensureMotionPermission();
-    } else {
-      this.calibration.skip();
-      saveCalibration(this.calibration.snapshot());
-      this.showMessage("GPS-only mode. G-forces are estimated from GPS and drift angle is unavailable.");
-    }
-    this.syncSensors();
-    this.refreshCalibrationStatus();
   }
 
   async handleEnableImu() {

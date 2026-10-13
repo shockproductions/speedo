@@ -1463,3 +1463,65 @@ body.driving .app-shell {
   outline: 2px dashed var(--accent);
   outline-offset: 4px;
 }
+
+/* ---------- Minimal setup ---------- */
+
+.setup-panel {
+  display: grid;
+  gap: 1rem;
+}
+
+.setup-panel .mode-cards {
+  grid-template-columns: repeat(4, 1fr);
+  margin-bottom: 0;
+}
+
+.setup-panel .mode-card {
+  padding: 0.8rem 0.5rem;
+  text-align: center;
+  justify-items: center;
+}
+
+.setup-panel .mode-card strong {
+  font-size: 1.05rem;
+}
+
+.setup-panel .mode-card span {
+  font-size: 0.75rem;
+}
+
+.setup-panel .actions .primary-button {
+  min-height: 64px;
+  font-size: 1.2rem;
+}
+
+.setup-status {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.4rem 1.2rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.setup-status strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-drawer > summary {
+  cursor: pointer;
+  font-weight: 700;
+  list-style-position: inside;
+}
+
+.settings-drawer[open] {
+  display: grid;
+  gap: 1rem;
+}
+
+@media (max-width: 380px) {
+  .setup-panel .mode-cards {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

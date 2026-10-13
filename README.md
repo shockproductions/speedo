@@ -22,7 +22,7 @@ Then open the site in a modern mobile browser, ideally Android Chrome, and grant
 
 ## How it works: three stages
 
-1. **Setup**: pick the session type (Logger, Track, Drift, Drag), its options, auto-start, and check GNSS/IMU status and calibration.
+1. **Setup**: pick the session type (Logger, Track, Drift, Drag) and press Start or Auto-Start. Track mode adds the track picker and editor; everything else lives in a collapsed Settings drawer. There is no calibration step: the IMU aligns itself while driving and again after the run.
 2. **Drive**: a full-screen in-car view with only what is useful at a glance, on three tabs:
    - **Speed**: big fused (EKF) speed redrawn every frame, plus the mode panel (lap clock and predictive delta, drift angle and score, drag timer, or logger totals)
    - **Map**: live position and trail with start/finish lines

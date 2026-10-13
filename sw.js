@@ -1,4 +1,4 @@
-const CACHE_NAME = "telemetry-tracker-v8";
+const CACHE_NAME = "telemetry-tracker-v9";
 const APP_ASSETS = [
   "./",
   "./index.html",
