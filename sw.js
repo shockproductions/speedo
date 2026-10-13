@@ -1,4 +1,4 @@
-const CACHE_NAME = "telemetry-tracker-v7";
+const CACHE_NAME = "telemetry-tracker-v8";
 const APP_ASSETS = [
   "./",
   "./index.html",
@@ -21,6 +21,7 @@ const APP_ASSETS = [
   "./src/map3d.js",
   "./src/replay.js",
   "./src/trackeditor.js",
+  "./src/transfer.js",
   "./src/settings.js",
   "./src/charts.js",
   "./src/filters.js",

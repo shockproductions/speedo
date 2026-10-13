@@ -149,10 +149,19 @@ export class DriveView {
     this.el.stopLabel.textContent = this.armedOnly ? "Disarm" : "Hold to stop";
   }
 
+  // Called every frame. Half-unit hysteresis keeps the last digit from flickering between two
+  // values, and the DOM is only touched when the shown number changes.
   updateSpeed(kmh) {
     const units = this.getUnits();
-    this.el.speed.textContent = Number.isFinite(kmh) ? Math.round(kmh * speedFactor(units)).toString() : "0";
-    this.el.speedUnit.textContent = speedUnit(units);
+    const value = Number.isFinite(kmh) ? Math.max(0, kmh * speedFactor(units)) : 0;
+    if (this.shownSpeed == null || Math.abs(value - this.shownSpeed) >= 0.6 || (value < 0.5 && this.shownSpeed !== 0)) {
+      this.shownSpeed = Math.round(value);
+      this.el.speed.textContent = String(this.shownSpeed);
+    }
+    if (this.shownUnits !== units) {
+      this.shownUnits = units;
+      this.el.speedUnit.textContent = speedUnit(units);
+    }
   }
 
   updateTrack({ lapSeconds, delta, lastLap, bestLap, lapCount, trackName }) {

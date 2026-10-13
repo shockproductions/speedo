@@ -29,7 +29,7 @@
       <header class="topbar">
         <div class="title-row">
           <h1>Speedo</h1>
-          <span class="version-badge">v0.11</span>
+          <span class="version-badge">v0.12</span>
           <button id="checkUpdatesButton" class="secondary-button utility-button" type="button">
             Check Updates
           </button>
@@ -324,7 +324,16 @@
                   <p class="eyebrow">Saved Sessions</p>
                   <h2>Sessions</h2>
                 </div>
+                <div class="detail-actions">
+                  <button id="importButton" class="secondary-button utility-button" type="button">Import</button>
+                  <button id="exportAllButton" class="secondary-button utility-button" type="button" disabled>Export All</button>
+                  <input id="importInput" type="file" accept=".speedo,.json,.gz,application/json,application/octet-stream,application/gzip" multiple hidden />
+                </div>
               </div>
+              <p class="panel-note transfer-note">
+                Move sessions between devices: Share a session (or Export All) on the phone, then
+                Import the file here, or drop it onto this page.
+              </p>
               <div id="runSummaryBar" class="detail-grid"></div>
               <div id="runList" class="run-list empty-state">
                 <p>No sessions yet. Record one to start building telemetry history.</p>
@@ -341,7 +350,7 @@
                   <button id="exportCsvButton" class="secondary-button utility-button" disabled>CSV</button>
                   <button id="exportVboButton" class="secondary-button utility-button" disabled>VBO</button>
                   <button id="exportGpxButton" class="secondary-button utility-button" disabled>GPX</button>
-                  <button id="exportJsonButton" class="secondary-button utility-button" disabled>JSON</button>
+                  <button id="exportJsonButton" class="secondary-button utility-button" disabled>Share</button>
                   <button id="deleteRunButton" class="danger-button utility-button" disabled>Delete</button>
                 </div>
               </div>

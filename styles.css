@@ -1451,3 +1451,15 @@ body.driving .app-shell {
 .pick-hint[hidden] {
   display: none;
 }
+
+/* ---------- Transfer ---------- */
+
+.transfer-note {
+  margin: 0.25rem 0 0.75rem;
+  font-size: 0.85rem;
+}
+
+#analysisStage.drop-target .panel {
+  outline: 2px dashed var(--accent);
+  outline-offset: 4px;
+}

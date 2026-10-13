@@ -24,7 +24,7 @@ Then open the site in a modern mobile browser, ideally Android Chrome, and grant
 
 1. **Setup**: pick the session type (Logger, Track, Drift, Drag), its options, auto-start, and check GNSS/IMU status and calibration.
 2. **Drive**: a full-screen in-car view with only what is useful at a glance, on three tabs:
-   - **Speed**: big fused speed plus the mode panel (lap clock and predictive delta, drift angle and score, drag timer, or logger totals)
+   - **Speed**: big fused (EKF) speed redrawn every frame, plus the mode panel (lap clock and predictive delta, drift angle and score, drag timer, or logger totals)
    - **Map**: live position and trail with start/finish lines
    - **G-Forces**: large friction circle with trail and peak markers
    Stopping needs a press-and-hold so a bump cannot end the session.
@@ -65,7 +65,8 @@ Then open the site in a modern mobile browser, ideally Android Chrome, and grant
 **Recording and data**
 - Every GNSS fix is logged (the rate cap only applies to IMU samples)
 - Sessions are saved in chunks while recording and recovered after a crash or app kill
-- Export CSV (10 Hz channels), RaceLogic VBO, GPX and JSON; km/h or mph
+- Move sessions between devices: Share a session (or Export All) from the phone's share sheet, then Import it on the desktop or drop the `.speedo` file onto the Analyse page. Packages carry the raw streams plus their tracks, gzip-compressed, and are re-analysed on import; sessions already present are skipped
+- Export CSV (10 Hz channels), RaceLogic VBO and GPX; km/h or mph
 
 ## Notes
 

@@ -21,6 +21,7 @@ import {
 } from "./settings.js";
 import { RunStorage } from "./storage.js";
 import { TrackEditor } from "./trackeditor.js";
+import { buildPackage, decodePackageBlob, encodePackage, packageFileName, readPackage, shareOrDownload } from "./transfer.js";
 import { haversineMeters } from "./geo.js";
 
 const PRE_ROLL_MS = 5000;
@@ -127,6 +128,7 @@ export class TelemetryUI {
     this.driveView.setTab(this.settings.driveTab ?? "speed");
     this.refreshCalibrationStatus();
     this.timers.hud = window.setInterval(() => this.tickHud(), HUD_TICK_MS);
+    this.startSpeedLoop();
 
     await this.enableMotionWithoutPrompt();
     this.syncSensors();
@@ -156,6 +158,9 @@ export class TelemetryUI {
       vbo: byId("exportVboButton"),
     };
     this.deleteRunButton = byId("deleteRunButton");
+    this.importButton = byId("importButton");
+    this.importInput = byId("importInput");
+    this.exportAllButton = byId("exportAllButton");
     this.checkUpdatesButton = byId("checkUpdatesButton");
     this.updateStatusMessage = byId("updateStatusMessage");
     this.installButton = byId("installButton");
@@ -256,6 +261,31 @@ export class TelemetryUI {
     this.exportButtons.gpx.addEventListener("click", () => this.exportRun("gpx"));
     this.exportButtons.vbo.addEventListener("click", () => this.exportRun("vbo"));
     this.deleteRunButton.addEventListener("click", () => this.handleDeleteRun());
+    this.importButton.addEventListener("click", () => this.importInput.click());
+    this.importInput.addEventListener("change", () => {
+      this.importFiles([...this.importInput.files]);
+      this.importInput.value = "";
+    });
+    this.exportAllButton.addEventListener("click", () => this.exportSessions(this.runs));
+    const analysisStage = document.getElementById("analysisStage");
+    analysisStage.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      analysisStage.classList.add("drop-target");
+    });
+    analysisStage.addEventListener("dragleave", () => analysisStage.classList.remove("drop-target"));
+    analysisStage.addEventListener("drop", (event) => {
+      event.preventDefault();
+      analysisStage.classList.remove("drop-target");
+      this.importFiles([...(event.dataTransfer?.files ?? [])]);
+    });
+    // Installed app opened by double-clicking a .speedo file (Chromium file handling).
+    window.launchQueue?.setConsumer(async (params) => {
+      const files = await Promise.all((params.files ?? []).map((handle) => handle.getFile()));
+      if (files.length) {
+        this.showStage("analysisStage");
+        this.importFiles(files);
+      }
+    });
     this.checkUpdatesButton.addEventListener("click", () => this.handleCheckForUpdates());
     for (const input of Object.values(this.inputs)) {
       input.addEventListener("change", () => this.readSettingsFromInputs());
@@ -530,14 +560,31 @@ export class TelemetryUI {
 
   // ---------- HUD ----------
 
+  // Speed is redrawn every animation frame from the fused EKF estimate, which is propagated
+  // with the IMU between GNSS fixes, so the readout reacts immediately instead of in 1 Hz steps.
+  startSpeedLoop() {
+    const frame = () => {
+      const t = now();
+      const estimate = this.navigator.estimate(t);
+      const kmh = estimate
+        ? estimate.speed * 3.6
+        : Number.isFinite(this.lastFix?.speed) ? this.lastFix.speed * 3.6 : 0;
+      if (this.stage === "driveStage") {
+        this.driveView.updateSpeed(kmh);
+      } else if (this.stage === "setupStage" && t - (this.lastSetupSpeedAt ?? 0) > 200) {
+        this.lastSetupSpeedAt = t;
+        this.setupSpeed.textContent = formatSpeed(kmh, this.settings.units);
+      }
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  }
+
   tickHud() {
     const t = now();
     const estimate = this.navigator.estimate(t);
-    const kmh = estimate ? estimate.speed * 3.6 : Number.isFinite(this.lastFix?.speed) ? this.lastFix.speed * 3.6 : 0;
-    this.setupSpeed.textContent = formatSpeed(kmh, this.settings.units);
 
     if (this.stage === "driveStage" || this.recordingActive) {
-      this.driveView.updateSpeed(kmh);
       this.driveView.updatePosition(estimate, t);
       this.driveView.setStatus({
         recording: this.recordingActive,
@@ -1201,6 +1248,7 @@ export class TelemetryUI {
 
   setRunButtonsEnabled(enabled) {
     for (const button of Object.values(this.exportButtons)) button.disabled = !enabled;
+    this.exportAllButton.disabled = !this.runs.length;
     this.deleteRunButton.disabled = !enabled;
   }
 
@@ -1217,9 +1265,7 @@ export class TelemetryUI {
     if (!run) return;
     const base = `${run.date.replaceAll(":", "-")}-${run.id}`;
     if (format === "json") {
-      // Raw streams plus the lap/drift results; derived 10 Hz series are rebuilt on import.
-      const { series: _series, points: _points, ...analysis } = run.analysis;
-      downloadBlob(`${base}.json`, JSON.stringify({ ...run, analysis }, null, 2), "application/json");
+      this.exportSessions([run]);
     } else if (format === "csv") {
       downloadBlob(`${base}.csv`, runToCsv(run), "text/csv;charset=utf-8");
     } else if (format === "gpx") {
@@ -1227,6 +1273,72 @@ export class TelemetryUI {
     } else if (format === "vbo") {
       downloadBlob(`${base}.vbo`, runToVbo(run), "text/plain");
     }
+  }
+
+  // ---------- moving sessions between devices ----------
+
+  async exportSessions(runs) {
+    if (!runs.length) return;
+    try {
+      const blob = await encodePackage(buildPackage(runs, this.tracks));
+      const result = await shareOrDownload(blob, packageFileName(runs));
+      if (result === "downloaded") {
+        this.showMessage(`Saved ${runs.length} session${runs.length > 1 ? "s" : ""}. Open Speedo on the other device and use Import.`, 5000);
+      }
+    } catch (error) {
+      console.warn("Export failed", error);
+      this.showMessage(`Export failed: ${error.message}`);
+    }
+  }
+
+  async importFiles(files) {
+    if (!files.length) return;
+    const existing = new Set((await this.storage.getRuns()).map((run) => run.id));
+    let imported = 0;
+    let duplicates = 0;
+    let newTracks = 0;
+    let lastId = null;
+    const problems = [];
+    this.showMessage("Importing...", 0);
+
+    for (const file of files) {
+      let contents;
+      try {
+        contents = readPackage(await decodePackageBlob(file));
+      } catch (error) {
+        problems.push(`${file.name}: ${error.message}`);
+        continue;
+      }
+      // Tracks first, so imported sessions are timed with their own lines. A newer copy wins.
+      for (const track of contents.tracks) {
+        const local = this.tracks.find((item) => item.id === track.id);
+        if (!local) newTracks += 1;
+        if (!local || (track.updatedAt ?? track.createdAt ?? "") > (local.updatedAt ?? local.createdAt ?? "")) {
+          await this.storage.saveTrack(track);
+        }
+      }
+      await this.refreshTracks();
+      for (const run of contents.runs) {
+        if (existing.has(run.id)) {
+          duplicates += 1;
+          continue;
+        }
+        const analyzed = analyzeRun(run, { tracks: this.tracks });
+        await this.storage.saveRun(analyzed);
+        await this.updateTrackBest(analyzed);
+        existing.add(run.id);
+        imported += 1;
+        lastId = run.id;
+      }
+    }
+
+    await this.refreshRuns(lastId ?? this.selectedRun?.id);
+    const parts = [
+      `Imported ${imported} session${imported === 1 ? "" : "s"}`,
+      duplicates ? `${duplicates} already here` : null,
+      newTracks ? `${newTracks} new track${newTracks === 1 ? "" : "s"}` : null,
+    ].filter(Boolean);
+    this.showMessage([parts.join(", ") + ".", ...problems].join(" "), problems.length ? 9000 : 5000);
   }
 
   // ---------- platform helpers ----------

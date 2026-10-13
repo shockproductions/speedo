@@ -1,7 +1,7 @@
 {
   "name": "Speedo",
   "short_name": "Speedo",
-  "description": "Mobile-first motorsport telemetry recorder for GNSS and accelerometer data.",
+  "description": "Motorsport telemetry: track, drift and drag timing with GNSS/IMU fusion.",
   "start_url": "./",
   "display": "standalone",
   "background_color": "#120606",
@@ -12,6 +12,16 @@
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any maskable"
+    }
+  ],
+  "file_handlers": [
+    {
+      "action": "./",
+      "accept": {
+        "application/octet-stream": [
+          ".speedo"
+        ]
+      }
     }
   ]
 }
