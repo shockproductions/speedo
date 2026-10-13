@@ -12,6 +12,8 @@ export const DEFAULT_SETTINGS = {
   autoStartKmh: 30,
   autoStopSeconds: 60,
   trackSelection: "auto",
+  gnssLagMs: 0,
+  driveTab: "speed",
 };
 
 function readJson(key) {

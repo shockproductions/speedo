@@ -97,10 +97,26 @@ export class MapView {
     this.map.fitBounds(L.latLngBounds(latLngs), { padding: [18, 18] });
   }
 
-  setCursor(lat, lon) {
-    if (this.cursor && Number.isFinite(lat) && Number.isFinite(lon)) {
-      this.cursor.setLatLng([lat, lon]);
-    }
+  // Replace the dot cursor with an arrow that shows the direction of travel.
+  useHeadingMarker() {
+    if (!this.map || !this.cursor) return;
+    const position = this.cursor.getLatLng();
+    this.cursor.remove();
+    this.cursor = L.marker(position, {
+      icon: L.divIcon({ className: "heading-marker", html: '<div class="heading-arrow"></div>', iconSize: [28, 28] }),
+      interactive: false,
+    }).addTo(this.map);
+  }
+
+  setCursor(lat, lon, heading = null) {
+    if (!this.cursor || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    this.cursor.setLatLng([lat, lon]);
+    const arrow = this.cursor.getElement?.()?.querySelector(".heading-arrow");
+    if (arrow && Number.isFinite(heading)) arrow.style.transform = `rotate(${heading}deg)`;
+  }
+
+  invalidate() {
+    this.map?.invalidateSize();
   }
 
   setPickHandler(handler) {

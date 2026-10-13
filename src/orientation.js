@@ -125,8 +125,9 @@ export function projectSample(calibration, sample) {
 }
 
 export class MountCalibration {
-  constructor({ onEvent } = {}) {
+  constructor({ onEvent, maxIntervals = MAX_INTERVALS } = {}) {
     this.onEvent = onEvent;
+    this.maxIntervals = maxIntervals;
     this.reset();
   }
 
@@ -257,8 +258,8 @@ export class MountCalibration {
       aLat: courseRate != null ? meanSpeed * courseRate : null,
       courseRate,
     });
-    if (this.intervals.length > MAX_INTERVALS) {
-      this.intervals.splice(0, this.intervals.length - MAX_INTERVALS);
+    if (this.intervals.length > this.maxIntervals) {
+      this.intervals.splice(0, this.intervals.length - this.maxIntervals);
     }
 
     this.startAnchor(current);
@@ -615,14 +616,181 @@ export function solveForward(intervals, gravity, gyroBias, prior = {}) {
   };
 }
 
-// Re-runs calibration over a whole recording. Falls back to the live snapshot where the
-// recording alone cannot determine something (e.g. the car never stopped).
+// ---------- trajectory alignment (post-run) ----------
+
+// Eigen-decomposition of a symmetric 4x4 matrix (cyclic Jacobi). Returns the eigenvector of
+// the largest eigenvalue.
+function largestEigenvector4(matrix) {
+  const a = matrix.map((row) => [...row]);
+  const v = [
+    [1, 0, 0, 0],
+    [0, 1, 0, 0],
+    [0, 0, 1, 0],
+    [0, 0, 0, 1],
+  ];
+  for (let sweep = 0; sweep < 60; sweep += 1) {
+    let offDiagonal = 0;
+    for (let p = 0; p < 4; p += 1) for (let q = p + 1; q < 4; q += 1) offDiagonal += a[p][q] ** 2;
+    if (offDiagonal < 1e-18) break;
+    for (let p = 0; p < 4; p += 1) {
+      for (let q = p + 1; q < 4; q += 1) {
+        if (Math.abs(a[p][q]) < 1e-15) continue;
+        const theta = (a[q][q] - a[p][p]) / (2 * a[p][q]);
+        const t = Math.sign(theta || 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+        const c = 1 / Math.sqrt(t * t + 1);
+        const sn = t * c;
+        for (let k = 0; k < 4; k += 1) {
+          const akp = a[k][p];
+          const akq = a[k][q];
+          a[k][p] = c * akp - sn * akq;
+          a[k][q] = sn * akp + c * akq;
+        }
+        for (let k = 0; k < 4; k += 1) {
+          const apk = a[p][k];
+          const aqk = a[q][k];
+          a[p][k] = c * apk - sn * aqk;
+          a[q][k] = sn * apk + c * aqk;
+        }
+        for (let k = 0; k < 4; k += 1) {
+          const vkp = v[k][p];
+          const vkq = v[k][q];
+          v[k][p] = c * vkp - sn * vkq;
+          v[k][q] = sn * vkp + c * vkq;
+        }
+      }
+    }
+  }
+  let best = 0;
+  for (let index = 1; index < 4; index += 1) if (a[index][index] > a[best][best]) best = index;
+  return v.map((row) => row[best]);
+}
+
+// Wahba's problem via Davenport's q-method: the rotation A minimising sum w |b - A r|^2.
+// Returns a function applying A to a vector.
+function solveWahba(pairs) {
+  const B = [
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ];
+  for (const { b, r, w } of pairs) {
+    const bv = [b.x, b.y, b.z];
+    const rv = [r.x, r.y, r.z];
+    for (let i = 0; i < 3; i += 1) for (let j = 0; j < 3; j += 1) B[i][j] += w * bv[i] * rv[j];
+  }
+  const sigma = B[0][0] + B[1][1] + B[2][2];
+  const z = [B[1][2] - B[2][1], B[2][0] - B[0][2], B[0][1] - B[1][0]];
+  const K = [
+    [2 * B[0][0] - sigma, B[0][1] + B[1][0], B[0][2] + B[2][0], z[0]],
+    [B[1][0] + B[0][1], 2 * B[1][1] - sigma, B[1][2] + B[2][1], z[1]],
+    [B[2][0] + B[0][2], B[2][1] + B[1][2], 2 * B[2][2] - sigma, z[2]],
+    [z[0], z[1], z[2], sigma],
+  ];
+  const [q1, q2, q3, q4] = largestEigenvector4(K);
+  const d = q4 * q4 - (q1 * q1 + q2 * q2 + q3 * q3);
+  const qv = [q1, q2, q3];
+  const skew = [
+    [0, -q3, q2],
+    [q3, 0, -q1],
+    [-q2, q1, 0],
+  ];
+  const A = [0, 1, 2].map((i) =>
+    [0, 1, 2].map((j) => (i === j ? d : 0) + 2 * qv[i] * qv[j] - 2 * q4 * skew[i][j]),
+  );
+  return (r) =>
+    vec(
+      A[0][0] * r.x + A[0][1] * r.y + A[0][2] * r.z,
+      A[1][0] * r.x + A[1][1] * r.y + A[1][2] * r.z,
+      A[2][0] * r.x + A[2][1] * r.y + A[2][2] * r.z,
+    );
+}
+
+const ALIGN_MIN_INTERVALS = 20;
+const ALIGN_MIN_SIGNAL_ENERGY = 40;
+const ROBUST_SCALE = 0.8;
+const TURNING_WEIGHT = 0.1;
+
+// Solves the full mount rotation and accelerometer bias from the GNSS trajectory: every GNSS
+// interval says what the car's acceleration was (longitudinal from speed change, lateral from
+// speed x course rate, plus gravity). Needs no stationary capture, and road grades/banking
+// average out over a session. Both sign conventions are tried (iOS reports the opposite sign).
+export function alignToTrajectory(intervals, gyroBias = null) {
+  const usable = [];
+  let signalEnergy = 0;
+  for (const interval of intervals) {
+    if (!Number.isFinite(interval.aLong)) continue;
+    const aLat = interval.aLat ?? 0;
+    let weight = interval.aLat == null ? 0.5 : 1;
+    // The body can only be slipping (pointing away from the direction of travel) while it is
+    // rotating, so turning intervals get a small weight. They still supply lateral excitation.
+    const turnRate = interval.meanGyro
+      ? magnitude(sub(interval.meanGyro, gyroBias ?? vec()))
+      : Math.abs(interval.courseRate ?? 0);
+    if (turnRate > STRAIGHT_YAW_RATE) weight *= TURNING_WEIGHT;
+    usable.push({ accel: interval.meanAccel, r: vec(interval.aLong, aLat, GRAVITY), w: weight });
+    signalEnergy += interval.aLong ** 2 + aLat ** 2;
+  }
+  if (usable.length < ALIGN_MIN_INTERVALS || signalEnergy < ALIGN_MIN_SIGNAL_ENERGY) {
+    return null;
+  }
+
+  let best = null;
+  for (const sign of [1, -1]) {
+    let bias = vec();
+    let rotate = null;
+    let weights = usable.map((item) => item.w);
+    // Iteratively reweighted: intervals that disagree with the fit (sliding corners, GNSS
+    // glitches) are down-weighted with a Cauchy kernel so they cannot tilt the solution.
+    for (let iteration = 0; iteration < 8; iteration += 1) {
+      rotate = solveWahba(
+        usable.map((item, index) => ({ b: scale(sub(item.accel, bias), sign), r: item.r, w: weights[index] })),
+      );
+      let residual = vec();
+      let weightSum = 0;
+      usable.forEach((item, index) => {
+        residual = add(residual, scale(sub(item.accel, scale(rotate(item.r), sign)), weights[index]));
+        weightSum += weights[index];
+      });
+      bias = scale(residual, 1 / weightSum);
+      if (iteration >= 2) {
+        weights = usable.map((item) => {
+          const error = magnitude(sub(item.accel, add(scale(rotate(item.r), sign), bias)));
+          return item.w / (1 + (error / ROBUST_SCALE) ** 2);
+        });
+      }
+    }
+    let loss = 0;
+    let energy = 0;
+    for (const item of usable) {
+      const errorVector = sub(item.accel, add(scale(rotate(item.r), sign), bias));
+      loss += item.w * dot(errorVector, errorVector);
+      energy += item.w * (item.r.x ** 2 + item.r.y ** 2);
+    }
+    if (!best || loss < best.loss) {
+      best = { sign, rotate, bias, loss, energy };
+    }
+  }
+
+  const { sign, rotate, bias } = best;
+  return {
+    gravity: add(scale(rotate(vec(0, 0, GRAVITY)), sign), bias),
+    forward: normalize(scale(rotate(vec(1, 0, 0)), sign)),
+    mirrored: sign < 0,
+    // Share of the dynamic (horizontal) signal explained by the fit.
+    quality: Math.max(0, 1 - best.loss / (best.energy || 1)),
+    accelBias: bias,
+  };
+}
+
+// Re-runs calibration over a whole recording, after the run. The mount is re-aligned against
+// the complete GNSS trajectory, so which way is forward is corrected even if the live solve
+// never converged. Falls back to the live snapshot where the recording cannot decide.
 export function calibrateRecording(imu, gnss, prior) {
   if (prior?.skipped || !imu?.length) {
     return prior ?? null;
   }
 
-  const calibration = new MountCalibration();
+  const calibration = new MountCalibration({ maxIntervals: Infinity });
   if (prior?.gravity) {
     calibration.restore({ ...prior, forward: null });
     calibration.gravitySource = "live";
@@ -641,12 +809,44 @@ export function calibrateRecording(imu, gnss, prior) {
     gnssIndex += 1;
   }
   calibration.solve();
-
   const snapshot = calibration.snapshot();
+  snapshot.alignment = snapshot.forward ? "solver" : null;
+
+  let aligned = alignToTrajectory(calibration.intervals, calibration.gyroBias);
+  const stationaryGravity = calibration.hasGravity() ? calibration.gravity : null;
+  if (aligned && stationaryGravity && angleBetweenDegrees(aligned.gravity, stationaryGravity) > 6) {
+    aligned = null;
+  }
+  if (aligned) {
+    snapshot.gravity = aligned.gravity;
+    snapshot.gravityProvisional = false;
+    snapshot.accelBias = aligned.accelBias;
+    snapshot.alignment = "trajectory";
+    // Refine forward with slip-free (straight-line) intervals against the trajectory gravity.
+    const refined = solveForward(calibration.intervals, aligned.gravity, calibration.gyroBias, {
+      mirrored: aligned.mirrored,
+      handednessKnown: true,
+    });
+    if (refined?.ready) {
+      snapshot.forward = refined.forward;
+      snapshot.mirrored = refined.mirrored;
+      snapshot.quality = refined.quality;
+      if (refined.yawSign) {
+        snapshot.yawSign = refined.yawSign;
+        snapshot.yawScale = refined.yawScale;
+      }
+    } else {
+      snapshot.forward = aligned.forward;
+      snapshot.mirrored = aligned.mirrored;
+      snapshot.quality = aligned.quality;
+    }
+  }
+
   if (!snapshot.forward && prior?.forward) {
     snapshot.forward = prior.forward;
     snapshot.mirrored = prior.mirrored;
     snapshot.quality = prior.quality;
+    snapshot.alignment = "live";
   }
   if (!snapshot.gravity && prior?.gravity) {
     snapshot.gravity = prior.gravity;

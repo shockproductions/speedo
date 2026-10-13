@@ -1,9 +1,10 @@
 import { DriftEstimator, DriftSegmenter } from "./drift.js";
+import { smoothTrajectory } from "./ekf.js";
 import { haversineMeters, toRadians, wrapRadians } from "./geo.js";
 import { autoGate, buildLaps, nearestTrack, summarizeLaps } from "./laptiming.js";
 import { calibrateRecording, courseOf, projectSample } from "./orientation.js";
 
-export const ANALYSIS_VERSION = 2;
+export const ANALYSIS_VERSION = 3;
 const KMH_FACTOR = 3.6;
 const QUARTER_MILE_METERS = 402.336;
 const SERIES_STEP_MS = 100;
@@ -142,37 +143,138 @@ function runDrift(vehicle, fixes) {
   return hasYaw ? betas : null;
 }
 
-// One row per 100 ms: interpolated position/speed/distance plus averaged vehicle channels.
-function buildSeries(points, vehicle, betas, origin, endT) {
+// GNSS timestamps are only known up to the phone's delivery latency. Find the lag that best lines
+// up GNSS speed changes with the IMU's longitudinal acceleration, so fused data is in sync.
+export function estimateGnssLag(fixes, vehicle) {
+  const times = [];
+  const cumulative = [0];
+  const turning = [0];
+  for (const sample of vehicle) {
+    if (!Number.isFinite(sample.longG)) continue;
+    times.push(sample.t);
+    cumulative.push(cumulative[cumulative.length - 1] + sample.longG * 9.80665);
+    turning.push(turning[turning.length - 1] + Math.abs(sample.yawRate ?? 0));
+  }
+  if (times.length < 100) return null;
+
+  const lowerBound = (value) => {
+    let low = 0;
+    let high = times.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (times[middle] < value) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  };
+  const meanBetween = (from, to) => {
+    const a = lowerBound(from);
+    const b = lowerBound(to);
+    return b - a >= 2 ? (cumulative[b] - cumulative[a]) / (b - a) : null;
+  };
+
+  const intervals = [];
+  // Pair fixes at least 0.4 s apart so high-rate GNSS noise does not swamp the speed change.
+  let anchor = 0;
+  for (let index = 1; index < fixes.length; index += 1) {
+    const a = fixes[anchor];
+    const b = fixes[index];
+    const dt = (b.t - a.t) / 1000;
+    if (dt < 0.4) continue;
+    anchor = index;
+    if (dt > 2.5 || !Number.isFinite(a.speed) || !Number.isFinite(b.speed)) continue;
+    if ((a.speed + b.speed) / 2 < 3) continue;
+    // Straight-line intervals only: while turning (or sliding) body and travel frames differ.
+    const first = lowerBound(a.t);
+    const last = lowerBound(b.t);
+    if (last - first >= 2 && (turning[last] - turning[first]) / (last - first) > 0.1) continue;
+    intervals.push({ from: a.t, to: b.t, accel: (b.speed - a.speed) / dt });
+  }
+  if (intervals.length < 30) return null;
+
+  const errorAt = (lag) => {
+    let total = 0;
+    let count = 0;
+    for (const interval of intervals) {
+      const mean = meanBetween(interval.from - lag, interval.to - lag);
+      if (mean == null) continue;
+      total += (interval.accel - mean) ** 2;
+      count += 1;
+    }
+    return count > intervals.length * 0.5 ? total / count : Infinity;
+  };
+
+  let bestLag = 0;
+  let bestError = errorAt(0);
+  for (let lag = -300; lag <= 1200; lag += 10) {
+    const error = errorAt(lag);
+    if (error < bestError) {
+      bestError = error;
+      bestLag = lag;
+    }
+  }
+  return { lagMs: bestLag, residual: Math.sqrt(bestError) };
+}
+
+// Rotates body-frame inputs into the direction of travel using the slip angle, so the fusion
+// filter integrates the right acceleration and course rate even while the car is sliding.
+function travelFrameInputs(vehicle, betas) {
+  if (!betas) return vehicle;
+  let betaIndex = 0;
+  let previous = null;
+  let slipRate = 0;
+  return vehicle.map((sample) => {
+    while (betaIndex < betas.length - 1 && betas[betaIndex + 1].t <= sample.t) betaIndex += 1;
+    const entry = betas[betaIndex];
+    const beta = entry && Math.abs(entry.t - sample.t) < 200 && Number.isFinite(entry.beta) ? (entry.beta * Math.PI) / 180 : 0;
+    if (previous && sample.t > previous.t) {
+      const rate = (beta - previous.beta) / ((sample.t - previous.t) / 1000);
+      slipRate += 0.3 * (rate - slipRate);
+    }
+    previous = { t: sample.t, beta };
+    if (!Number.isFinite(sample.longG)) return sample;
+    const aForward = sample.longG * 9.80665;
+    const aLeft = -sample.latG * 9.80665;
+    return {
+      ...sample,
+      travelAccel: aForward * Math.cos(beta) - aLeft * Math.sin(beta),
+      courseRate: Number.isFinite(sample.yawRate) ? sample.yawRate - slipRate : null,
+    };
+  });
+}
+
+// One row per 100 ms: position, speed and course from the smoothed GNSS/IMU trajectory (so
+// samples between 1 Hz fixes follow the car through corners), plus averaged vehicle channels.
+function buildSeries(smoothed, vehicle, betas, origin) {
   const series = [];
-  if (!points.length) return series;
-  let pointIndex = 0;
   let vehicleIndex = 0;
   let betaIndex = 0;
-  const endSeconds = (endT - origin) / 1000;
+  let distance = 0;
+  let previous = null;
 
-  for (let t = Math.max(0, points[0].t); t <= Math.min(endSeconds, points[points.length - 1].t); t += SERIES_STEP_MS / 1000) {
-    while (pointIndex < points.length - 2 && points[pointIndex + 1].t < t) pointIndex += 1;
-    const a = points[pointIndex];
-    const b = points[Math.min(pointIndex + 1, points.length - 1)];
-    const fraction = b.t > a.t ? Math.min(1, Math.max(0, (t - a.t) / (b.t - a.t))) : 0;
+  for (const state of smoothed) {
+    if (previous) distance += ((state.v + previous.v) / 2) * ((state.t - previous.t) / 1000);
+    previous = state;
+    const t = (state.t - origin) / 1000;
     const row = {
       t,
-      d: a.d + (b.d - a.d) * fraction,
-      v: a.v + (b.v - a.v) * fraction,
-      la: a.lat + (b.lat - a.lat) * fraction,
-      lo: a.lon + (b.lon - a.lon) * fraction,
+      d: distance,
+      v: state.v * KMH_FACTOR,
+      la: state.lat,
+      lo: state.lon,
+      hdg: ((90 - (state.chi * 180) / Math.PI) % 360 + 360) % 360,
       lon: null,
       lat: null,
       yaw: null,
       beta: null,
     };
 
-    const windowStart = origin + (t - 0.05) * 1000;
-    const windowEnd = origin + (t + 0.05) * 1000;
+    const windowStart = state.t - SERIES_STEP_MS / 2;
+    const windowEnd = state.t + SERIES_STEP_MS / 2;
     while (vehicleIndex < vehicle.length && vehicle[vehicleIndex].t < windowStart) vehicleIndex += 1;
     let longSum = 0;
     let latSum = 0;
+    let vertSum = 0;
     let yawSum = 0;
     let count = 0;
     let yawCount = 0;
@@ -181,6 +283,7 @@ function buildSeries(points, vehicle, betas, origin, endT) {
       if (Number.isFinite(sample.longG)) {
         longSum += sample.longG;
         latSum += sample.latG;
+        vertSum += sample.vertG ?? 0;
         count += 1;
       }
       if (Number.isFinite(sample.yawRate)) {
@@ -191,6 +294,7 @@ function buildSeries(points, vehicle, betas, origin, endT) {
     if (count) {
       row.lon = longSum / count;
       row.lat = latSum / count;
+      row.vert = vertSum / count;
     }
     if (yawCount) {
       row.yaw = ((yawSum / yawCount) * 180) / Math.PI;
@@ -199,7 +303,7 @@ function buildSeries(points, vehicle, betas, origin, endT) {
     if (betas) {
       while (betaIndex < betas.length - 1 && betas[betaIndex + 1].t <= windowEnd) betaIndex += 1;
       const beta = betas[betaIndex];
-      if (beta && Math.abs(beta.t - (origin + t * 1000)) < 250) row.beta = beta.beta;
+      if (beta && Math.abs(beta.t - state.t) < 250) row.beta = beta.beta;
     }
     series.push(row);
   }
@@ -302,13 +406,21 @@ export function analyzeRun(inputRun, { tracks = [] } = {}) {
   );
   const endT = Math.max(fixes[fixes.length - 1]?.t ?? 0, imu[imu.length - 1]?.t ?? 0, origin + (run.duration || 0));
 
-  const calibration = run.calibration?.skipped ? run.calibration : calibrateRecording(imu, fixes, run.calibration);
-  const vehicle = vehicleSeries(imu, calibration);
+  let calibration = run.calibration?.skipped ? run.calibration : calibrateRecording(imu, fixes, run.calibration);
+  let vehicle = vehicleSeries(imu, calibration);
+  const lag = estimateGnssLag(fixes, vehicle);
+  if (lag && Math.abs(lag.lagMs) >= 20) {
+    // Shift GNSS onto the IMU clock and re-solve the mount with the synchronised data.
+    for (const fix of fixes) fix.t -= lag.lagMs;
+    calibration = calibrateRecording(imu, fixes, run.calibration);
+    vehicle = vehicleSeries(imu, calibration);
+  }
   const hasG = vehicle.some((sample) => Number.isFinite(sample.longG));
   const betas = runDrift(vehicle, fixes);
 
   const points = buildPoints(fixes, origin);
-  const series = buildSeries(points, vehicle, betas, origin, endT);
+  const smoothed = smoothTrajectory(fixes, travelFrameInputs(vehicle, betas), { stepMs: SERIES_STEP_MS });
+  const series = buildSeries(smoothed, vehicle, betas, origin);
 
   const track = resolveTrack(run, fixes, tracks);
   const gateTrack = track ?? (run.trackId === "none" ? null : (() => {
@@ -344,6 +456,7 @@ export function analyzeRun(inputRun, { tracks = [] } = {}) {
       version: ANALYSIS_VERSION,
       calibration,
       calibrationQuality: calibration?.forward ? calibration.quality : null,
+      gnssLagMs: lag?.lagMs ?? null,
       hasG,
       hasGyro: Boolean(betas),
       track: usedTrack

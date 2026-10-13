@@ -20,39 +20,51 @@ python -m http.server 8080
 
 Then open the site in a modern mobile browser, ideally Android Chrome, and grant location and motion permissions.
 
+## How it works: three stages
+
+1. **Setup**: pick the session type (Logger, Track, Drift, Drag), its options, auto-start, and check GNSS/IMU status and calibration.
+2. **Drive**: a full-screen in-car view with only what is useful at a glance, on three tabs:
+   - **Speed**: big fused speed plus the mode panel (lap clock and predictive delta, drift angle and score, drag timer, or logger totals)
+   - **Map**: live position and trail with start/finish lines
+   - **G-Forces**: large friction circle with trail and peak markers
+   Stopping needs a press-and-hold so a bump cannot end the session.
+3. **Analyse**: post-processing of saved sessions:
+   - **Overview**: summary, lap table with sectors, drift table, lap timing source
+   - **Map**: 2D (speed-coloured line, edit start/finish and sector lines) or 3D (a ribbon whose height and colour follow speed, g or drift angle, optional terrain)
+   - **Graphs**: lap A vs lap B overlays by distance with delta trace, friction circle, and a custom graph builder (any channels against time or distance, session or lap)
+   - **Replay**: play back at 0.5x to 16x with a heading arrow on the map and live gauges, scrub, or jump to a lap
+
 ## Features
 
 **Track days**
-- Lap timing from a start/finish line, with crossing times interpolated between GPS fixes (about 10-50 ms accuracy even on 1 Hz phone GPS)
-- Saved tracks with sectors, theoretical best, out-lap/in-lap detection; tracks are picked automatically by location
-- No track saved? A start/finish line is placed automatically 20 s after you first get up to speed; save it as a track afterwards
-- "Mark Start/Finish Here" button for setting the line while driving
-- Live lap clock, last/best lap and predictive delta against your best lap (session or all-time for the track)
-- Spoken lap times and vibration on each lap
-- Arm Auto-Start: recording starts above a set speed (keeping the previous 5 s), stops after standing still, and re-arms for the next session
+- Lap timing from a start/finish line, with crossing times interpolated between GPS fixes
+- Saved tracks with sectors, theoretical best and out-lap/in-lap detection; tracks are picked automatically by location
+- Automatic start/finish line when no track is saved, plus "Mark Start/Finish Here" while driving
+- Live predictive delta against your best lap, spoken lap times
+- Arm Auto-Start: starts above a set speed (keeping the previous 5 s), stops after standing still, re-arms for the next session
 
 **Drift days**
 - Drift angle from gyro yaw versus GPS course, propagated between fixes with slip kinematics
-- Automatic drift detection with angle, duration, speed, transitions and a score (angle x speed x time, +10% per transition)
-- Live drift HUD and optional pitch-follows-angle tone
+- Drift detection with angle, duration, speed, transitions and a score; live drift HUD and optional tone
 
-**Analysis**
-- Speed, g-force and drift-angle overlays by distance, lap A vs lap B with a delta-time trace
-- Friction circle (g-g), speed-coloured map with gate lines, chart-to-map cursor
-- Sessions grouped by day; drag metrics (0-100 km/h, 1/4 mile) from a standing start
+**Drag**
+- Live stage/launch detection, 0-100 km/h (or 0-60 mph), 1/8 and 1/4 mile with trap speed
 
-**Calibration**
-- The mount angle is captured automatically whenever the car stands still (or on demand)
-- The forward axis is solved from GPS while driving by matching IMU accelerations to GPS-derived longitudinal and lateral acceleration; only straight-line intervals set the angle, so drifting does not bias it
-- Axis handedness and gyro sign are detected from the data, which covers iOS's inverted accelerometer sign
-- Calibration is saved across reloads and invalidated automatically if the mount moves
-- Sessions are re-processed with the final calibration, so data recorded before the solve converged is still correct
+**Sensor fusion**
+- An extended Kalman filter fuses GNSS (the slow sensor, often 1 Hz) with vehicle-frame acceleration and gyro yaw rate, so position, speed and course keep updating between fixes and through GNSS dropouts. Its heading is initialised from the first consecutive moving-forward GNSS fixes. Fixes that disagree strongly with the prediction are rejected.
+- Live, the filter drives the speed readout and map. After the run, a forward pass plus a Rauch-Tung-Striebel backward smoother produces the 10 Hz trajectory used for maps, graphs, distance and replay.
+- While sliding, inputs are rotated into the direction of travel using the drift angle.
+- GNSS delivery latency is measured after each session by lining up GPS speed changes with the IMU, and is reused by the live filter.
+
+**IMU alignment**
+- Live: the mount angle is captured whenever the car stands still, and the forward axis is solved from GPS while driving
+- After the run, the alignment is re-calculated from the whole trajectory: the full mount rotation and accelerometer bias are solved against GNSS-derived accelerations (Wahba's problem, robustly reweighted so sliding corners cannot tilt it), then the forward axis is refined on straight-line intervals. This works even if the car never stopped, and corrects which way is forward.
+- Axis handedness and gyro sign are detected from the data, covering iOS's inverted accelerometer sign
 
 **Recording and data**
-- Every GNSS fix is logged (the rate cap only applies to IMU samples); fix timestamps are aligned to the motion clock
+- Every GNSS fix is logged (the rate cap only applies to IMU samples)
 - Sessions are saved in chunks while recording and recovered after a crash or app kill
-- Export CSV (10 Hz channels), RaceLogic VBO, GPX and JSON
-- km/h or mph
+- Export CSV (10 Hz channels), RaceLogic VBO, GPX and JSON; km/h or mph
 
 ## Notes
 
@@ -64,6 +76,6 @@ Then open the site in a modern mobile browser, ideally Android Chrome, and grant
 ## Future improvements
 
 - External Bluetooth GPS receivers (10-25 Hz) via Web Bluetooth
+- Video overlay export synced to replay
 - Pre-downloading map tiles for offline track use
-- Video overlay sync markers
 - Live telemetry dashboard and remote viewer

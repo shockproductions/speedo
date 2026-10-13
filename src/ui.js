@@ -1,20 +1,16 @@
-import {
-  analyzeRun,
-  formatDelta,
-  formatDuration,
-  formatLapTime,
-  needsReanalysis,
-} from "./analysis.js";
+import { analyzeRun, formatDelta, formatDuration, formatLapTime, needsReanalysis } from "./analysis.js";
+import { AnalysisView, escapeHtml } from "./analysisview.js";
 import { Announcer, DriftTone } from "./audio.js";
+import { DragTimer } from "./dragtimer.js";
 import { DriftEstimator, DriftSegmenter } from "./drift.js";
+import { DriveView } from "./driveview.js";
+import { LiveNavigator } from "./ekf.js";
 import { runToCsv, runToGpx, runToVbo } from "./exporters.js";
 import { LightMotionFilter } from "./filters.js";
 import { IMUView } from "./imuview.js";
 import { createGate, lapTrace, LiveLapTimer, nearestTrack } from "./laptiming.js";
-import { LiveHud } from "./livehud.js";
-import { courseOf, GRAVITY, MountCalibration } from "./orientation.js";
+import { courseOf, MountCalibration } from "./orientation.js";
 import { RunRecorder } from "./recorder.js";
-import { escapeHtml, RunView } from "./runview.js";
 import { SensorManager } from "./sensors.js";
 import {
   formatSpeed,
@@ -22,8 +18,6 @@ import {
   loadSettings,
   saveCalibration,
   saveSettings,
-  speedFactor,
-  speedUnit,
 } from "./settings.js";
 import { RunStorage } from "./storage.js";
 
@@ -61,7 +55,7 @@ export class TelemetryUI {
     this.motionFilter = new LightMotionFilter(0.18);
     this.recorder = new RunRecorder({
       onSampleCount: (count) => {
-        this.sampleCountDirty = count;
+        this.sampleCount = count;
       },
     });
     this.sensors = new SensorManager({
@@ -69,9 +63,11 @@ export class TelemetryUI {
       onMotion: (payload) => this.handleMotion(payload),
       onStatus: (type, message) => this.handleSensorStatus(type, message),
     });
+    this.navigator = new LiveNavigator();
     this.lapTimer = new LiveLapTimer({ onEvent: (event) => this.handleLapEvent(event) });
     this.driftEstimator = new DriftEstimator();
     this.driftSegmenter = new DriftSegmenter({ onChainEnd: (chain) => this.handleDriftChain(chain) });
+    this.dragTimer = new DragTimer({ onEvent: (event) => this.handleDragEvent(event) });
     this.announcer = new Announcer();
     this.driftTone = new DriftTone();
 
@@ -80,7 +76,7 @@ export class TelemetryUI {
     this.runs = [];
     this.tracks = [];
     this.selectedRun = null;
-    this.currentPage = "recorderPage";
+    this.stage = "setupStage";
     this.recordingActive = false;
     this.armed = false;
     this.autoStarted = false;
@@ -91,23 +87,26 @@ export class TelemetryUI {
     this.fixArrivals = [];
     this.standingSince = null;
     this.liveTrack = null;
-    this.liveSpeedMps = 0;
-    this.lastSpeedUpdate = 0;
     this.latestProjection = null;
     this.drawPending = false;
     this.lastDriftSample = 0;
     this.driftState = { angle: null, chainScore: null, lastScore: null, bestScore: null };
+    this.logger = { distanceMeters: 0, maxKmh: 0, movingSeconds: 0, lastT: null };
     this.chunkSeq = 0;
-    this.sampleCountDirty = null;
+    this.sampleCount = 0;
     this.timers = {};
     this.wakeLock = null;
   }
 
   async init() {
     this.cacheElements();
-    this.hud = new LiveHud(this.livePanel);
+    this.driveView = new DriveView(this.driveStage, {
+      getUnits: () => this.settings.units,
+      onStop: () => this.handleStopRun("manual"),
+      onDisarm: () => this.handleArmToggle(),
+    });
     this.imuView = new IMUView(this.imuMount);
-    this.runView = new RunView(this.runDetails, {
+    this.analysisView = new AnalysisView(this.runDetails, {
       getUnits: () => this.settings.units,
       getTracks: () => this.tracks,
       assignTrack: (run, value) => this.assignTrack(run, value),
@@ -117,8 +116,7 @@ export class TelemetryUI {
     this.applySettingsToInputs();
     this.bindEvents();
     this.registerPwa();
-    this.hud.drawG(null, now());
-    this.hud.resetTiming();
+    this.driveView.setTab(this.settings.driveTab ?? "speed");
     this.refreshCalibrationStatus();
     this.timers.hud = window.setInterval(() => this.tickHud(), HUD_TICK_MS);
 
@@ -131,20 +129,14 @@ export class TelemetryUI {
 
   cacheElements() {
     const byId = (id) => document.getElementById(id);
-    this.livePanel = byId("livePanel");
-    this.liveSpeed = byId("liveSpeed");
-    this.speedUnitLabel = byId("speedUnit");
+    this.driveStage = byId("driveStage");
     this.startButton = byId("startButton");
-    this.stopButton = byId("stopButton");
     this.armButton = byId("armButton");
     this.markStartFinishButton = byId("markStartFinishButton");
-    this.recordingState = byId("recordingState");
     this.locationStatus = byId("locationStatus");
     this.motionStatus = byId("motionStatus");
-    this.liveTrackName = byId("liveTrackName");
-    this.permissionMessage = byId("permissionMessage");
-    this.sampleCount = byId("sampleCount");
-    this.elapsedValue = byId("elapsedValue");
+    this.setupSpeed = byId("setupSpeed");
+    this.toast = byId("toast");
     this.runList = byId("runList");
     this.runSummaryBar = byId("runSummaryBar");
     this.runDetails = byId("runDetails");
@@ -180,9 +172,31 @@ export class TelemetryUI {
     this.enableImuButton = byId("enableImuButton");
     this.disableImuButton = byId("disableImuButton");
     this.imuMount = byId("imuMount");
-    this.modeButtons = [...document.querySelectorAll(".mode-button")];
-    this.pages = [...document.querySelectorAll(".page")];
-    this.tabButtons = [...document.querySelectorAll(".tab-button")];
+    this.modeCards = [...document.querySelectorAll(".mode-card")];
+    this.modeOptions = [...document.querySelectorAll(".mode-options")];
+    this.stages = [...document.querySelectorAll(".stage")];
+    this.stageButtons = [...document.querySelectorAll(".stage-button")];
+  }
+
+  // ---------- stages ----------
+
+  showStage(stageId) {
+    this.stage = stageId;
+    for (const stage of this.stages) stage.classList.toggle("active", stage.id === stageId);
+    for (const button of this.stageButtons) button.classList.toggle("active", button.dataset.stage === stageId);
+    document.body.classList.toggle("driving", stageId === "driveStage");
+    if (stageId === "driveStage") {
+      this.driveView.setTab(this.driveView.tab ?? "speed");
+    }
+    window.scrollTo(0, 0);
+    this.syncSensors();
+  }
+
+  updateStageButtons() {
+    const live = this.recordingActive || this.armed;
+    const driveButton = this.stageButtons.find((button) => button.dataset.stage === "driveStage");
+    driveButton.disabled = !live;
+    driveButton.classList.toggle("live", live);
   }
 
   // ---------- settings ----------
@@ -197,7 +211,6 @@ export class TelemetryUI {
     this.announcer.enabled = this.settings.voice;
     this.driftTone.enabled = this.settings.driftTone;
     this.setMode(this.settings.mode);
-    this.speedUnitLabel.textContent = speedUnit(this.settings.units);
   }
 
   readSettingsFromInputs() {
@@ -210,16 +223,15 @@ export class TelemetryUI {
     this.settings.driftTone = this.driftToneToggle.checked;
     this.announcer.enabled = this.settings.voice;
     this.driftTone.enabled = this.settings.driftTone;
-    this.speedUnitLabel.textContent = speedUnit(this.settings.units);
     saveSettings(this.settings);
   }
 
   setMode(mode) {
+    if (this.recordingActive) return;
     this.settings.mode = mode;
-    this.hud.setMode(mode);
-    for (const button of this.modeButtons) {
-      button.classList.toggle("active", button.dataset.mode === mode);
-    }
+    for (const card of this.modeCards) card.classList.toggle("active", card.dataset.mode === mode);
+    for (const section of this.modeOptions) section.hidden = section.dataset.for !== mode;
+    this.driveView.setMode(mode);
     saveSettings(this.settings);
   }
 
@@ -227,7 +239,6 @@ export class TelemetryUI {
 
   bindEvents() {
     this.startButton.addEventListener("click", () => this.handleStartRun());
-    this.stopButton.addEventListener("click", () => this.handleStopRun("manual"));
     this.armButton.addEventListener("click", () => this.handleArmToggle());
     this.markStartFinishButton.addEventListener("click", () => this.handleMarkStartFinish());
     this.exportButtons.json.addEventListener("click", () => this.exportRun("json"));
@@ -241,6 +252,7 @@ export class TelemetryUI {
     }
     this.unitsSelect.addEventListener("change", () => {
       this.readSettingsFromInputs();
+      this.driveView.setMode(this.settings.mode);
       if (this.selectedRun) this.renderRunDetails(this.selectedRun, { keepSelection: true });
       this.renderRunList();
     });
@@ -260,11 +272,17 @@ export class TelemetryUI {
     this.skipCalibrationButton.addEventListener("click", () => this.handleSkipCalibration());
     this.enableImuButton.addEventListener("click", () => this.handleEnableImu());
     this.disableImuButton.addEventListener("click", () => this.handleDisableImu());
-    for (const button of this.modeButtons) {
-      button.addEventListener("click", () => this.setMode(button.dataset.mode));
+    for (const card of this.modeCards) {
+      card.addEventListener("click", () => this.setMode(card.dataset.mode));
     }
-    for (const button of this.tabButtons) {
-      button.addEventListener("click", () => this.showPage(button.dataset.page));
+    for (const button of this.stageButtons) {
+      button.addEventListener("click", () => this.showStage(button.dataset.stage));
+    }
+    for (const button of this.driveStage.querySelectorAll(".drive-tab")) {
+      button.addEventListener("click", () => {
+        this.settings.driveTab = button.dataset.tab;
+        saveSettings(this.settings);
+      });
     }
 
     this.installButton.addEventListener("click", async () => {
@@ -280,13 +298,6 @@ export class TelemetryUI {
       this.installButton.hidden = false;
     });
     document.addEventListener("visibilitychange", () => this.handleVisibilityChange());
-  }
-
-  showPage(pageId) {
-    this.currentPage = pageId;
-    for (const page of this.pages) page.classList.toggle("active", page.id === pageId);
-    for (const button of this.tabButtons) button.classList.toggle("active", button.dataset.page === pageId);
-    this.syncSensors();
   }
 
   // ---------- PWA ----------
@@ -346,7 +357,6 @@ export class TelemetryUI {
     if (!message) return;
     this.timers.updateStatus = window.setTimeout(() => {
       this.updateStatusMessage.hidden = true;
-      this.updateStatusMessage.textContent = "";
     }, durationMs);
   }
 
@@ -363,12 +373,10 @@ export class TelemetryUI {
 
   syncSensors() {
     const live = this.recordingActive || this.armed;
-    const motionWanted =
-      this.imuStreaming ||
-      (!this.calibration.isSkipped() && (live || this.currentPage === "recorderPage"));
+    const inSetup = this.stage === "setupStage";
     this.sensors.setStreams({
-      location: live || this.currentPage === "recorderPage",
-      motion: motionWanted,
+      location: live || inSetup,
+      motion: this.imuStreaming || (!this.calibration.isSkipped() && (live || inSetup)),
     });
     this.enableImuButton.disabled = this.imuStreaming;
     this.disableImuButton.disabled = !this.imuStreaming;
@@ -384,19 +392,25 @@ export class TelemetryUI {
     }
   }
 
+  gnssText() {
+    const arrivals = this.fixArrivals;
+    if (!this.lastFix || now() - this.lastFix.arrival > 3000) return "No GNSS";
+    const span = arrivals.length > 1 ? (arrivals[arrivals.length - 1] - arrivals[0]) / 1000 : 0;
+    const rate = span > 0 ? (arrivals.length - 1) / span : 0;
+    const accuracy = Number.isFinite(this.lastFix.accuracy) ? ` ±${Math.round(this.lastFix.accuracy)} m` : "";
+    return `${rate ? `${rate.toFixed(rate < 2 ? 1 : 0)} Hz` : "Live"}${accuracy}`;
+  }
+
   handleLocation(fix) {
     this.previousFix = this.lastFix;
     this.lastFix = fix;
     this.fixArrivals.push(fix.arrival);
     if (this.fixArrivals.length > 10) this.fixArrivals.shift();
-    this.updateGnssStatus(fix);
+    this.locationStatus.textContent = this.gnssText();
 
     this.calibration.ingestFix(fix);
-    if (Number.isFinite(fix.speed)) {
-      this.liveSpeedMps = Math.max(0, fix.speed);
-      this.lastSpeedUpdate = fix.t;
-      this.renderSpeed();
-    }
+    // GNSS timestamps run late by the delivery latency measured after previous sessions.
+    this.navigator.ingestFix({ ...fix, t: fix.t - (this.settings.gnssLagMs || 0) }, fix.arrival);
 
     if (this.recordingActive) {
       this.lapTimer.ingestFix(fix);
@@ -409,14 +423,6 @@ export class TelemetryUI {
         this.handleStartRun({ auto: true });
       }
     }
-  }
-
-  updateGnssStatus(fix) {
-    const arrivals = this.fixArrivals;
-    const span = arrivals.length > 1 ? (arrivals[arrivals.length - 1] - arrivals[0]) / 1000 : 0;
-    const rate = span > 0 ? (arrivals.length - 1) / span : 0;
-    const accuracy = Number.isFinite(fix.accuracy) ? ` ±${Math.round(fix.accuracy)} m` : "";
-    this.locationStatus.textContent = `${rate ? `${rate.toFixed(rate < 2 ? 1 : 0)} Hz` : "Live"}${accuracy}`;
   }
 
   handleMotion(payload) {
@@ -435,7 +441,6 @@ export class TelemetryUI {
     }
     const projection = this.calibration.project(sample);
     this.latestProjection = projection;
-    this.integrateSpeed(sample.t, projection);
 
     if (this.recordingActive) {
       this.driftEstimator.ingestImu(sample.t, projection);
@@ -447,26 +452,24 @@ export class TelemetryUI {
     } else if (this.armed) {
       this.pushPreRoll("imu", sample);
     }
+    this.navigator.ingestImu(sample.t, projection, this.recordingActive ? this.driftEstimator.currentBeta() : null);
 
-    if (this.currentPage === "imuPage") {
+    if (this.recordingActive && this.settings.mode === "drag") {
+      const estimate = this.navigator.estimate(sample.t);
+      const target = this.settings.units === "mph" ? 60 / 2.23694 : 100 / 3.6;
+      if (estimate) this.dragTimer.ingest(sample.t, estimate.speed, target);
+    }
+
+    if (this.imuStreaming) {
       this.imuView.update(filtered);
     }
-    if (!this.drawPending) {
+    if (this.stage === "driveStage" && !this.drawPending) {
       this.drawPending = true;
       requestAnimationFrame(() => {
         this.drawPending = false;
-        this.hud.drawG(this.latestProjection, now());
+        this.driveView.drawG(this.latestProjection, now());
       });
     }
-  }
-
-  // Smooth the speed readout between GNSS fixes using calibrated longitudinal acceleration.
-  integrateSpeed(t, projection) {
-    if (!projection.forwardReady || !this.lastSpeedUpdate || t - this.lastSpeedUpdate > 1500) return;
-    const dt = Math.min(Math.max((t - (this.lastIntegration ?? t)) / 1000, 0), 0.1);
-    this.lastIntegration = t;
-    if (!dt || this.liveSpeedMps < 2) return;
-    this.liveSpeedMps = Math.max(0, this.liveSpeedMps + projection.longG * GRAVITY * dt);
   }
 
   pushPreRoll(stream, item) {
@@ -477,7 +480,8 @@ export class TelemetryUI {
 
   updateLiveDrift(t) {
     const beta = this.driftEstimator.currentBeta();
-    const chain = this.driftSegmenter.ingest(t, beta, this.liveSpeedMps * 3.6);
+    const estimate = this.navigator.estimate(t);
+    const chain = this.driftSegmenter.ingest(t, beta, (estimate?.speed ?? 0) * 3.6);
     this.driftState.angle = beta;
     this.driftState.chainScore = chain ? chain.score : null;
     this.driftTone.update(beta, Boolean(chain));
@@ -488,9 +492,20 @@ export class TelemetryUI {
     if (this.driftState.bestScore == null || chain.score > this.driftState.bestScore) {
       this.driftState.bestScore = chain.score;
       if (this.settings.mode === "drift") {
-        this.hud.flash(`Best drift ${chain.score}`, "good");
+        this.driveView.flash(`Best drift ${chain.score}`, "good");
         this.announcer.say(`Best drift. ${chain.score}`);
       }
+    }
+  }
+
+  handleDragEvent(event) {
+    if (event.type === "staged") {
+      this.announcer.say("Staged");
+    } else if (event.type === "finish" && event.result.quarter != null) {
+      this.driveView.flash(`1/4 mile ${event.result.quarter.toFixed(2)} s`, "good");
+      this.announcer.say(`Quarter mile. ${event.result.quarter.toFixed(2)}`);
+    } else if (event.type === "target") {
+      this.announcer.say(event.time.toFixed(2));
     }
   }
 
@@ -498,31 +513,67 @@ export class TelemetryUI {
 
   tickHud() {
     const t = now();
-    if (this.sampleCountDirty != null) {
-      this.sampleCount.textContent = String(this.sampleCountDirty);
-      this.sampleCountDirty = null;
-    }
-    if (this.recordingActive && this.recorder.run) {
-      this.elapsedValue.textContent = formatDuration(t - this.recorder.run.startedAt);
-      this.hud.updateTrack({
-        lapSeconds: this.lapTimer.currentLapSeconds(t),
-        delta: this.lapTimer.delta,
-        lastLap: this.lapTimer.lastLap,
-        bestLap: this.lapTimer.bestLap,
-        lapNumber: this.lapTimer.lapNumber,
+    const estimate = this.navigator.estimate(t);
+    const kmh = estimate ? estimate.speed * 3.6 : Number.isFinite(this.lastFix?.speed) ? this.lastFix.speed * 3.6 : 0;
+    this.setupSpeed.textContent = formatSpeed(kmh, this.settings.units);
+
+    if (this.stage === "driveStage" || this.recordingActive) {
+      this.driveView.updateSpeed(kmh);
+      this.driveView.updatePosition(estimate, t);
+      this.driveView.setStatus({
+        recording: this.recordingActive,
+        armed: this.armed,
+        elapsedMs: this.recorder.run ? t - this.recorder.run.startedAt : 0,
+        gnssText: this.gnssText(),
+        imuText: this.imuShortStatus(),
       });
-      this.hud.updateDrift(this.driftState);
+      if (this.recordingActive) {
+        this.updateLogger(t, estimate);
+        const mode = this.settings.mode;
+        if (mode === "track") {
+          this.driveView.updateTrack({
+            lapSeconds: this.lapTimer.currentLapSeconds(t),
+            delta: this.lapTimer.delta,
+            lastLap: this.lapTimer.lastLap,
+            bestLap: this.lapTimer.bestLap,
+            lapCount: this.lapTimer.lapNumber,
+          });
+        } else if (mode === "drift") {
+          this.driveView.updateDrift(this.driftState);
+        } else if (mode === "drag") {
+          this.driveView.updateDrag(this.dragTimer, t);
+        } else {
+          this.driveView.updateLogger({
+            distanceMeters: this.logger.distanceMeters,
+            maxKmh: this.logger.maxKmh,
+            averageKmh: this.logger.movingSeconds ? (this.logger.distanceMeters / this.logger.movingSeconds) * 3.6 : 0,
+          });
+        }
+      }
     }
-    this.renderSpeed();
     this.tickCount = (this.tickCount ?? 0) + 1;
     if (this.tickCount % 5 === 0) {
       this.refreshCalibrationStatus();
     }
   }
 
-  renderSpeed() {
-    const kmh = this.liveSpeedMps * 3.6 * speedFactor(this.settings.units);
-    this.liveSpeed.textContent = Math.round(kmh).toString();
+  updateLogger(t, estimate) {
+    const logger = this.logger;
+    if (estimate && logger.lastT != null) {
+      const dt = Math.min((t - logger.lastT) / 1000, 1);
+      logger.distanceMeters += estimate.speed * dt;
+      if (estimate.speed > 1) logger.movingSeconds += dt;
+      logger.maxKmh = Math.max(logger.maxKmh, estimate.speed * 3.6);
+    }
+    logger.lastT = t;
+  }
+
+  imuShortStatus() {
+    const status = this.calibration.getStatus();
+    if (status.skipped) return "GPS only";
+    if (!status.gravityReady) return "IMU: stop to level";
+    if (!status.forwardReady) return "IMU: aligning";
+    return "IMU ok";
   }
 
   // ---------- calibration ----------
@@ -531,7 +582,7 @@ export class TelemetryUI {
     if (event === "captured") {
       this.showMessage("Mount angle locked.", 2500);
     } else if (event === "mount-moved") {
-      this.showMessage("Phone mount moved. Recalibrating the forward axis while you drive.");
+      this.showMessage("Phone mount moved. Re-aligning the forward axis while you drive.");
     } else if (event === "forward-ready") {
       this.showMessage("Forward axis solved from GPS. G-forces are now in the car's frame.", 3500);
     } else if (event === "capture-failed") {
@@ -548,13 +599,13 @@ export class TelemetryUI {
     this.calibrationGyro.textContent = status.gyro;
     this.skipCalibrationButton.textContent = status.skipped ? "Use IMU" : "GPS Only (No IMU)";
     this.captureMountButton.disabled = status.skipped || status.capturing;
-    this.hud.setGNote(
+    this.driveView.setGNote(
       status.skipped
         ? "GPS-only mode"
         : !status.gravityReady
           ? "Waiting for the car to stand still"
           : !status.forwardReady
-            ? "Drive to auto-calibrate the forward axis"
+            ? "Drive to auto-align the forward axis"
             : "",
     );
   }
@@ -583,7 +634,7 @@ export class TelemetryUI {
     saveCalibration(null);
     this.syncSensors();
     this.refreshCalibrationStatus();
-    this.showMessage("Calibration cleared. It will re-capture when the car stops and re-solve while you drive.");
+    this.showMessage("Calibration cleared. It re-captures when the car stops and re-solves while you drive.");
   }
 
   async handleSkipCalibration() {
@@ -594,7 +645,7 @@ export class TelemetryUI {
     } else {
       this.calibration.skip();
       saveCalibration(this.calibration.snapshot());
-      this.showMessage("GPS-only mode. G-forces will be estimated from GPS and drift angle is unavailable.");
+      this.showMessage("GPS-only mode. G-forces are estimated from GPS and drift angle is unavailable.");
     }
     this.syncSensors();
     this.refreshCalibrationStatus();
@@ -607,7 +658,7 @@ export class TelemetryUI {
       return;
     }
     this.imuStreaming = true;
-    this.showPage("imuPage");
+    this.syncSensors();
   }
 
   handleDisableImu() {
@@ -630,22 +681,26 @@ export class TelemetryUI {
     if (this.armed) {
       this.armed = false;
       this.preRoll = { gnss: [], imu: [] };
-      this.updateRecordingControls();
+      if (!this.recordingActive) {
+        await this.releaseWakeLock();
+        this.showStage("setupStage");
+      }
+      this.updateStageButtons();
       this.syncSensors();
       return;
     }
     const ready = await this.requestRecordingPermissions();
     if (!ready) return;
+    this.readSettingsFromInputs();
     this.driftTone.unlock();
     this.armed = true;
     this.preRoll = { gnss: [], imu: [] };
+    this.driveView.resetSession();
     await this.acquireWakeLock();
-    this.updateRecordingControls();
-    this.syncSensors();
-    this.showMessage(
-      `Armed: recording starts above ${this.settings.autoStartKmh || 30} km/h` +
-        (this.settings.autoStopSeconds ? ` and stops after ${this.settings.autoStopSeconds} s standing.` : "."),
-      4000,
+    this.updateStageButtons();
+    this.showStage("driveStage");
+    this.driveView.flash(
+      `Armed: recording starts above ${this.settings.autoStartKmh || 30} km/h`,
     );
   }
 
@@ -674,18 +729,26 @@ export class TelemetryUI {
     this.standingSince = null;
 
     const selection = this.settings.trackSelection;
-    this.liveTrack = this.selectLiveTrack();
+    const timingWanted = this.settings.mode === "track";
+    this.liveTrack = timingWanted ? this.selectLiveTrack() : null;
     this.lapTimer.configure({
       track: this.liveTrack,
       minLapSeconds: this.settings.lapMinSeconds || 10,
-      autoGate: selection !== "none",
+      autoGate: timingWanted && selection !== "none",
       referenceTrace: this.liveTrack?.bestLap?.trace ?? null,
     });
     this.driftEstimator.reset();
     this.driftSegmenter.reset();
+    this.dragTimer.reset();
     this.driftState = { angle: null, chainScore: null, lastScore: null, bestScore: null };
-    this.hud.resetTiming();
-    this.liveTrackName.textContent = this.liveTrack?.name ?? (selection === "none" ? "Off" : "Auto");
+    this.logger = { distanceMeters: 0, maxKmh: 0, movingSeconds: 0, lastT: null };
+    this.driveView.resetSession();
+    this.driveView.setMode(this.settings.mode);
+    this.driveView.updateTrack({
+      lapSeconds: null, delta: null, lastLap: null, bestLap: null, lapCount: 0,
+      trackName: this.liveTrack?.name ?? (selection === "none" ? "Lap timing off" : "Auto start/finish"),
+    });
+    this.updateDriveGates();
 
     const preRoll = auto ? this.preRoll : null;
     this.recorder.start(
@@ -694,12 +757,12 @@ export class TelemetryUI {
         maxDurationSeconds: this.settings.maxDurationSeconds,
         lapMinSeconds: this.settings.lapMinSeconds,
         mode: this.settings.mode,
-        trackId: selection === "none" ? "none" : this.liveTrack?.id ?? null,
+        trackId: !timingWanted || selection === "none" ? (timingWanted ? "none" : null) : this.liveTrack?.id ?? null,
       },
       preRoll,
     );
     if (preRoll) {
-      // Replay the buffered fixes so the live timer and drift estimator are not starting blind.
+      // Replay the buffered fixes so the live timer does not start blind.
       for (const fix of preRoll.gnss) this.lapTimer.ingestFix(fix);
     }
     this.preRoll = { gnss: [], imu: [] };
@@ -715,11 +778,21 @@ export class TelemetryUI {
 
     this.requestNotificationPermission();
     await this.acquireWakeLock();
-    this.updateRecordingControls();
-    this.syncSensors();
-    if (auto) {
-      this.announcer.say("Recording");
-    }
+    this.updateStageButtons();
+    this.showStage("driveStage");
+    if (auto) this.announcer.say("Recording");
+  }
+
+  updateDriveGates() {
+    const track = this.lapTimer.track;
+    this.driveView.setGates(
+      track
+        ? [
+            { ...track.startFinish, color: "#ffffff" },
+            ...(track.sectors ?? []).map((gate) => ({ ...gate, color: "#c792ea" })),
+          ]
+        : [],
+    );
   }
 
   async flushChunk() {
@@ -760,25 +833,30 @@ export class TelemetryUI {
 
     const run = this.recorder.stop(this.calibration.snapshot());
     saveCalibration(this.calibration.snapshot());
-    this.updateRecordingControls();
+    this.updateStageButtons();
+    if (!reArm) this.showStage("analysisStage");
     this.syncSensors();
-    this.elapsedValue.textContent = "0:00";
 
     if (!run || (!run.gnss.length && !run.imu.length)) {
       if (run) await this.storage.deleteRun(run.id);
       this.showMessage("No telemetry samples were captured.");
+      if (!reArm) this.showStage("setupStage");
       return;
     }
 
+    this.showMessage("Processing session: re-aligning IMU to the trajectory and smoothing...", 0);
+    // Let the toast paint before the heavy processing.
+    await new Promise((resolve) => window.setTimeout(resolve, 30));
     const analyzed = analyzeRun(run, { tracks: this.tracks });
     await this.storage.saveRun(analyzed);
     await this.storage.deleteChunks(run.id);
+    this.rememberGnssLag(analyzed);
     await this.updateTrackBest(analyzed);
     await this.refreshRuns(analyzed.id);
 
     const { summary } = analyzed.analysis;
     const parts = [
-      reason === "auto-stop" ? "Session auto-stopped and saved" : "Session saved",
+      reArm ? "Session auto-stopped and saved" : "Session saved",
       summary.lapCount ? `${summary.lapCount} laps, best ${formatLapTime(summary.bestLap)}` : null,
       summary.driftCount ? `${summary.driftCount} drifts, ${summary.driftScore} pts` : null,
       reason === "max-duration" ? "time limit reached" : null,
@@ -787,43 +865,53 @@ export class TelemetryUI {
     this.showMessage(`${parts.join(" · ")}.`, 6000);
   }
 
-  updateRecordingControls() {
-    const recording = this.recordingActive;
-    this.startButton.disabled = recording;
-    this.stopButton.disabled = !recording;
-    this.armButton.textContent = this.armed ? "Disarm" : "Arm Auto-Start";
-    this.armButton.classList.toggle("armed", this.armed);
-    this.recordingState.textContent = recording ? "Recording" : this.armed ? "Armed: waiting for speed" : "Ready to record";
-    this.recordingState.className = `status-pill ${recording ? "recording" : this.armed ? "armed" : "idle"}`;
+  // The latency found by aligning GNSS with the IMU is reused by the live fusion filter.
+  rememberGnssLag(run) {
+    const lag = run.analysis.gnssLagMs;
+    if (!Number.isFinite(lag)) return;
+    const previous = this.settings.gnssLagMs;
+    this.settings.gnssLagMs = Number.isFinite(previous) && previous ? Math.round(previous * 0.5 + lag * 0.5) : lag;
+    saveSettings(this.settings);
   }
 
   handleLapEvent(event) {
     if (event.type === "lap") {
       const tone = event.isBest ? "good" : "bad";
       const deltaText = event.deltaToBest == null ? "" : event.isBest ? " best" : ` ${formatDelta(event.deltaToBest)}`;
-      this.hud.flash(`Lap ${event.number}: ${formatLapTime(event.time)}${deltaText}`, tone);
-      if (this.settings.mode !== "drag") this.announcer.announceLap(event);
+      this.driveView.flash(`Lap ${event.number}: ${formatLapTime(event.time)}${deltaText}`, tone);
+      this.announcer.announceLap(event);
       navigator.vibrate?.(event.isBest ? [80, 60, 80] : 120);
     } else if (event.type === "auto-gate") {
-      this.liveTrackName.textContent = "Auto line";
-      this.showMessage("Start/finish line placed automatically. Laps count from here; save it as a track afterwards.", 5000);
+      this.driveView.updateTrack({ ...this.liveTrackState(), trackName: "Auto start/finish (placed)" });
+      this.updateDriveGates();
+      this.driveView.flash("Start/finish placed automatically");
       this.announcer.say("Start finish set");
     } else if (event.type === "sector") {
-      this.hud.flash(`S${event.sector}: ${event.split.toFixed(2)}`);
+      this.driveView.flash(`S${event.sector}: ${event.split.toFixed(2)}`);
     } else if (event.type === "lap-start") {
-      this.hud.flash("Lap timing started");
+      this.driveView.flash("Lap timing started");
     }
+  }
+
+  liveTrackState() {
+    return {
+      lapSeconds: this.lapTimer.currentLapSeconds(now()),
+      delta: this.lapTimer.delta,
+      lastLap: this.lapTimer.lastLap,
+      bestLap: this.lapTimer.bestLap,
+      lapCount: this.lapTimer.lapNumber,
+    };
   }
 
   async handleMarkStartFinish() {
     const fix = this.lastFix;
     if (!fix || now() - fix.arrival > 3000) {
-      this.showMessage("No recent GPS fix. Wait for GNSS to go live.");
+      this.driveView.flash("No recent GPS fix", "bad");
       return;
     }
     const heading = courseOf(fix, this.previousFix);
     if (heading == null) {
-      this.showMessage("Drive through the start/finish line so the direction of travel is known, then tap again.");
+      this.driveView.flash("Drive through the line, then tap again", "bad");
       return;
     }
     const gate = createGate(fix, heading);
@@ -844,14 +932,13 @@ export class TelemetryUI {
     await this.storage.saveTrack(track);
     await this.refreshTracks();
     this.liveTrack = track;
-    this.liveTrackName.textContent = track.name;
     if (this.recordingActive) {
       this.lapTimer.markStartFinish(track, fix);
       this.recorder.run.trackId = track.id;
       await this.storage.saveRun(this.recorder.header());
-      this.hud.flash("Start/finish set. Lap 1 started");
-    } else {
-      this.showMessage(`Saved start/finish for "${track.name}". Rename it from the Sessions page.`, 4000);
+      this.updateDriveGates();
+      this.driveView.updateTrack({ ...this.liveTrackState(), trackName: track.name });
+      this.driveView.flash("Start/finish set. Lap 1 started");
     }
   }
 
@@ -860,12 +947,11 @@ export class TelemetryUI {
   async refreshTracks() {
     this.tracks = await this.storage.getTracks();
     const selection = this.settings.trackSelection ?? "auto";
-    const options = [
+    this.trackSelect.innerHTML = [
       `<option value="auto">Auto (nearest saved track)</option>`,
       ...this.tracks.map((track) => `<option value="${escapeHtml(track.id)}">${escapeHtml(track.name)}</option>`),
       `<option value="none">Off (no lap timing)</option>`,
-    ];
-    this.trackSelect.innerHTML = options.join("");
+    ].join("");
     const valid = selection === "auto" || selection === "none" || this.tracks.some((track) => track.id === selection);
     this.trackSelect.value = valid ? selection : "auto";
     this.deleteTrackButton.disabled = !this.tracks.some((track) => track.id === this.trackSelect.value);
@@ -878,9 +964,12 @@ export class TelemetryUI {
     this.settings.trackSelection = "auto";
     saveSettings(this.settings);
     await this.refreshTracks();
-    await this.reanalyzeRuns((run) => run.trackId === track.id || run.analysis?.track?.id === track.id, (run) => {
-      if (run.trackId === track.id) run.trackId = null;
-    });
+    await this.reanalyzeRuns(
+      (run) => run.trackId === track.id || run.analysis?.track?.id === track.id,
+      (run) => {
+        if (run.trackId === track.id) run.trackId = null;
+      },
+    );
   }
 
   async updateTrackBest(run) {
@@ -890,12 +979,7 @@ export class TelemetryUI {
     const track = this.tracks.find((item) => item.id === trackId);
     if (!track || (track.bestLap && track.bestLap.time <= bestLap)) return;
     const lap = run.analysis.laps.find((item) => item.number === bestLapNumber);
-    track.bestLap = {
-      time: bestLap,
-      runId: run.id,
-      date: run.date,
-      trace: lapTrace(run.analysis.points, lap),
-    };
+    track.bestLap = { time: bestLap, runId: run.id, date: run.date, trace: lapTrace(run.analysis.points, lap) };
     await this.storage.saveTrack(track);
   }
 
@@ -928,8 +1012,6 @@ export class TelemetryUI {
     await this.storage.saveTrack(track);
     await this.refreshTracks();
     await this.reanalyzeRuns((item) => item.analysis?.track?.id === trackId || item.trackId === trackId);
-    const updated = this.runs.find((item) => item.id === run.id);
-    if (updated) this.renderRunDetails(updated);
   }
 
   async reanalyzeAndShow(run) {
@@ -987,9 +1069,9 @@ export class TelemetryUI {
       this.selectedRun = null;
       this.renderRunList();
       this.setRunButtonsEnabled(false);
-      this.runView.destroy();
+      this.analysisView.destroy();
       this.runDetails.className = "details-empty";
-      this.runDetails.innerHTML = "<p>Select a session to see laps, sectors, g-forces and drifts.</p>";
+      this.runDetails.innerHTML = "<p>Select a session to see laps, maps, graphs and replay.</p>";
       return;
     }
     const run = this.runs.find((item) => item.id === selectRunId) ?? this.runs[0];
@@ -997,17 +1079,13 @@ export class TelemetryUI {
   }
 
   renderRunSummary() {
-    const bestQuarter = this.runs
-      .map((run) => run.analysis?.summary?.quarterMileSeconds)
-      .filter(Number.isFinite);
+    const bestQuarter = this.runs.map((run) => run.analysis?.summary?.quarterMileSeconds).filter(Number.isFinite);
     const items = [
-      `<article class="detail-stat"><span>Saved Sessions</span><strong>${this.runs.length}</strong></article>`,
-      `<article class="detail-stat"><span>Saved Tracks</span><strong>${this.tracks.length}</strong></article>`,
+      `<article class="detail-stat"><span>Sessions</span><strong>${this.runs.length}</strong></article>`,
+      `<article class="detail-stat"><span>Tracks</span><strong>${this.tracks.length}</strong></article>`,
     ];
     if (bestQuarter.length) {
-      items.push(
-        `<article class="detail-stat"><span>Best 1/4 Mile</span><strong>${Math.min(...bestQuarter).toFixed(2)} s</strong></article>`,
-      );
+      items.push(`<article class="detail-stat"><span>Best 1/4 Mile</span><strong>${Math.min(...bestQuarter).toFixed(2)} s</strong></article>`);
     }
     this.runSummaryBar.innerHTML = items.join("");
   }
@@ -1033,14 +1111,15 @@ export class TelemetryUI {
         heading.textContent = day;
         this.runList.appendChild(heading);
       }
-
       const summary = run.analysis.summary;
       const trackName = run.analysis.track?.id ? run.analysis.track.name : null;
       const headline = summary.lapCount
         ? `${formatLapTime(summary.bestLap)} best lap`
         : summary.driftCount
           ? `${summary.driftScore} drift pts`
-          : `${formatSpeed(summary.maxSpeedKmh, units)} max`;
+          : Number.isFinite(summary.quarterMileSeconds) && run.mode === "drag"
+            ? `${summary.quarterMileSeconds.toFixed(2)} s 1/4 mile`
+            : `${formatSpeed(summary.maxSpeedKmh, units)} max`;
       const meta = [
         formatDuration(summary.durationSeconds * 1000),
         summary.lapCount ? `${summary.lapCount} laps` : null,
@@ -1055,8 +1134,7 @@ export class TelemetryUI {
       card.innerHTML = `
         <p class="eyebrow">${date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })} · ${escapeHtml(trackName ?? run.mode ?? "session")}</p>
         <h3>${headline}</h3>
-        <div class="run-meta">${meta.map((item) => `<span>${item}</span>`).join("")}</div>
-      `;
+        <div class="run-meta">${meta.map((item) => `<span>${item}</span>`).join("")}</div>`;
       card.addEventListener("click", () => this.renderRunDetails(run));
       this.runList.appendChild(card);
     }
@@ -1069,7 +1147,8 @@ export class TelemetryUI {
     this.detailTitle.textContent = `${new Date(run.date).toLocaleString()}${trackName}`;
     this.setRunButtonsEnabled(true);
     this.runDetails.className = "run-details";
-    this.runView.render(run, options);
+    this.analysisView.destroy();
+    this.analysisView.render(run, options);
   }
 
   setRunButtonsEnabled(enabled) {
@@ -1104,13 +1183,13 @@ export class TelemetryUI {
 
   // ---------- platform helpers ----------
 
-  showMessage(message, autoHideMs = 0) {
+  showMessage(message, autoHideMs = 5000) {
     window.clearTimeout(this.timers.message);
-    this.permissionMessage.hidden = !message;
-    this.permissionMessage.textContent = message;
+    this.toast.hidden = !message;
+    this.toast.textContent = message;
     if (message && autoHideMs) {
       this.timers.message = window.setTimeout(() => {
-        this.permissionMessage.hidden = true;
+        this.toast.hidden = true;
       }, autoHideMs);
     }
   }
@@ -1148,9 +1227,7 @@ export class TelemetryUI {
   }
 
   async showRecordingNotification() {
-    if (!this.serviceWorkerRegistration || !("Notification" in window) || Notification.permission !== "granted") {
-      return;
-    }
+    if (!this.serviceWorkerRegistration || !("Notification" in window) || Notification.permission !== "granted") return;
     await this.serviceWorkerRegistration.showNotification("Telemetry recording in progress", {
       body: "Keep the app visible and the phone unlocked for reliable sensor capture.",
       tag: "telemetry-recording",
@@ -1177,6 +1254,6 @@ export class TelemetryUI {
     }
     await this.flushChunk();
     await this.showRecordingNotification();
-    this.showMessage("Most mobile browsers pause sensors while the app is hidden or the phone is locked.");
   }
 }
+
